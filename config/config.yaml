@@ -1,9 +1,9 @@
 vpn: false
 vpn_delay: 5
-# auto = Brave, then Chrome (Vivaldi often shows a blank Discord page)
+# auto = Thorium, then Chromium, Arc, Vivaldi. Never Chrome/Brave/Edge.
 browser: auto
-# Optional .exe path. Do not use a Start Menu .lnk
-# Example: 'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe'
+# Real .exe only. Start Menu .lnk files will not launch.
+# Example: 'C:\Users\YOU\AppData\Local\Thorium\Application\thorium.exe'
 browser_path: ""
 cybertemp_key: ""
 draxon_key: ""

@@ -70,11 +70,7 @@ supported levels are `DEBUG`, `INFO`, `WARNING`, and `ERROR`.
 
 ## 📦 Extension Installation
 
-The LeNinja browser extension is automatically downloaded on first run. It integrates seamlessly with:
-- Chrome
-- Brave
-- Edge
-- Other Chromium-based browsers
+The LeNinja browser extension is automatically downloaded on first run. Use **Thorium** (recommended) or ungoogled Chromium. Chrome, Brave, and Edge are not launched because Discord register stays blank under automation.
 
 ## 🔧 Advanced Features
 

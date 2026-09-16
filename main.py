@@ -480,8 +480,40 @@ async def setup_leninja(log_func=None):
 
 BROWSER_SETTINGS = {"name": "auto", "path": None}
 
-# Prefer browsers that actually render Discord. Vivaldi often stays on a white page.
+# Discord register blanks on Brave/Chrome/Edge with CDP + AutomationControlled.
+# Auto mode never launches those. Thorium is the default Chromium CDP target.
 BROWSER_EXECUTABLES = {
+    "thorium": [
+        r"C:\Program Files\Thorium\thorium.exe",
+        r"C:\Program Files\Thorium\Application\thorium.exe",
+        r"C:\Program Files (x86)\Thorium\Application\thorium.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Thorium\Application\thorium.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Thorium\thorium.exe"),
+        "/usr/bin/thorium-browser",
+        "/usr/bin/thorium",
+        "/opt/thorium/thorium",
+    ],
+    "chromium": [
+        r"C:\Program Files\Chromium\Application\chrome.exe",
+        r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Chromium\Application\chrome.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\ungoogled-chromium\Application\chrome.exe"),
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/ungoogled-chromium",
+    ],
+    "arc": [
+        os.path.expandvars(r"%LOCALAPPDATA%\Arc\Application\Arc.exe"),
+        "/Applications/Arc.app/Contents/MacOS/Arc",
+    ],
+    "vivaldi": [
+        r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
+        r"C:\Program Files (x86)\Vivaldi\Application\vivaldi.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe"),
+        "/usr/bin/vivaldi",
+        "/usr/bin/vivaldi-stable",
+        "/opt/vivaldi/vivaldi",
+    ],
     "brave": [
         r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
         r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
@@ -496,36 +528,9 @@ BROWSER_EXECUTABLES = {
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
     ],
-    "chromium": [
-        r"C:\Program Files\Chromium\Application\chrome.exe",
-        r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Chromium\Application\chrome.exe"),
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/ungoogled-chromium",
-    ],
-    "thorium": [
-        r"C:\Program Files\Thorium\thorium.exe",
-        r"C:\Program Files\Thorium\Application\thorium.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Thorium\Application\thorium.exe"),
-        "/usr/bin/thorium-browser",
-        "/opt/thorium/thorium",
-    ],
-    "arc": [
-        os.path.expandvars(r"%LOCALAPPDATA%\Arc\Application\Arc.exe"),
-        "/Applications/Arc.app/Contents/MacOS/Arc",
-    ],
-    "vivaldi": [
-        r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
-        r"C:\Program Files (x86)\Vivaldi\Application\vivaldi.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe"),
-        "/usr/bin/vivaldi",
-        "/usr/bin/vivaldi-stable",
-        "/opt/vivaldi/vivaldi",
-    ],
 }
-BROWSER_SEARCH_ORDER = ("brave", "chrome", "chromium", "thorium", "arc", "vivaldi")
-SLOW_DISCORD_BROWSERS = ("vivaldi",)
+BROWSER_SEARCH_ORDER = ("thorium", "chromium", "arc", "vivaldi")
+BLOCKED_AUTO_BROWSERS = ("brave", "chrome", "msedge", "edge", "google-chrome")
 
 
 def first_existing_path(paths):
@@ -601,7 +606,7 @@ def resolve_browser_executable(path):
     if path.lower().endswith(".lnk"):
         return resolve_shortcut_target(path)
     if os.path.isdir(path):
-        for name in ("brave.exe", "chrome.exe", "vivaldi.exe", "thorium.exe", "Arc.exe"):
+        for name in ("thorium.exe", "chrome.exe", "vivaldi.exe", "Arc.exe", "brave.exe"):
             for nested in (os.path.join(path, name), os.path.join(path, "Application", name)):
                 if is_browser_executable(nested):
                     return nested
@@ -611,17 +616,40 @@ def resolve_browser_executable(path):
     return None
 
 
-def browser_label(path, fallback="vivaldi"):
+def browser_label(path, fallback="thorium"):
     if not path:
         return fallback
+    lower = path.lower()
     name = os.path.splitext(os.path.basename(path))[0].lower()
-    if name in ("chrome",):
+    if "thorium" in lower:
+        return "thorium"
+    if "vivaldi" in lower:
+        return "vivaldi"
+    if "brave" in lower:
+        return "brave"
+    if "msedge" in lower or "microsoft\\edge" in lower or "microsoft/edge" in lower:
+        return "edge"
+    if name in ("chrome", "chromium"):
         parent = os.path.basename(os.path.dirname(os.path.dirname(path) if os.path.basename(os.path.dirname(path)).lower() == "application" else os.path.dirname(path))).lower()
-        if "chromium" in parent:
+        if "chromium" in parent or "ungoogled" in lower:
             return "chromium"
-        if "vivaldi" in path.lower():
-            return "vivaldi"
+        if "google" in lower:
+            return "chrome"
     return name or fallback
+
+
+def is_blocked_discord_browser(path, name=""):
+    label = (name or browser_label(path) or "").strip().lower()
+    if label in BLOCKED_AUTO_BROWSERS:
+        return True
+    blob = f"{path or ''} {name or ''}".lower().replace("/", "\\")
+    if "bravesoftware" in blob or "\\brave.exe" in blob or blob.endswith("brave.exe"):
+        return True
+    if "google\\chrome" in blob or "google-chrome" in blob:
+        return True
+    if "msedge" in blob or "microsoft\\edge" in blob:
+        return True
+    return False
 
 
 def configure_browser(config=None):
@@ -638,36 +666,42 @@ def find_browser_path(preferred=None, explicit_path=None):
     explicit_path = explicit_path if explicit_path is not None else BROWSER_SETTINGS.get("path")
 
     def first_preferred():
-        order = BROWSER_SEARCH_ORDER if preferred in ("auto", "any", "") else (preferred,) + BROWSER_SEARCH_ORDER
+        requested = () if preferred in ("auto", "any", "") else (preferred,)
+        order = requested + BROWSER_SEARCH_ORDER
         seen = set()
         for name in order:
             if name in seen or name not in BROWSER_EXECUTABLES:
                 continue
             seen.add(name)
+            if name in BLOCKED_AUTO_BROWSERS:
+                continue
             found = first_existing_path(BROWSER_EXECUTABLES[name])
-            if found:
+            if found and not is_blocked_discord_browser(found, name):
                 return found, name
         return None, preferred
+
+    if preferred in BLOCKED_AUTO_BROWSERS:
+        log_message("WARNING", "Chrome, Brave, and Edge blank Discord register; using Thorium or Chromium instead")
 
     if explicit_path:
         resolved = resolve_browser_executable(explicit_path)
         label = browser_label(resolved, preferred) if resolved else ""
-        slow = bool(resolved) and (
-            (label or "").lower() == "vivaldi"
-            or os.path.splitext(os.path.basename(resolved))[0].lower() == "vivaldi"
-        )
-        if resolved and not slow:
+        blocked = bool(resolved) and is_blocked_discord_browser(resolved, label)
+        if resolved and not blocked:
             return resolved, label
         better, better_name = first_preferred()
         if better and (not resolved or os.path.normcase(better) != os.path.normcase(resolved)):
-            if slow:
-                log_message("WARNING", "vivaldi often shows a blank Discord page; switching to a faster Chromium browser")
+            if blocked:
+                log_message(
+                    "WARNING",
+                    "Chrome/Brave/Edge cannot be used for Discord register; switching to Thorium/Chromium",
+                )
             return better, better_name
-        if resolved:
+        if resolved and not blocked:
             return resolved, label or preferred
         log_message(
             "WARNING",
-            "browser_path is not a usable .exe. Searching for Brave or Chrome instead",
+            "browser_path is not a usable Thorium/Chromium .exe (Start Menu .lnk files are ignored)",
         )
 
     found, name = first_preferred()
@@ -2197,8 +2231,11 @@ class BrowserContext:
         if not browser_path:
             log_message(
                 "ERROR",
-                "no supported browser found. install Brave (recommended) or Chrome, then set browser_path to the .exe",
+                "no supported browser found. install Thorium, then set browser_path to thorium.exe (not Chrome, Brave, Edge, or a .lnk)",
             )
+            return None
+        if is_blocked_discord_browser(browser_path, browser_name):
+            log_message("ERROR", "refusing Chrome/Brave/Edge; Discord register stays blank")
             return None
 
         args = [
@@ -2210,11 +2247,8 @@ class BrowserContext:
             "--disable-renderer-backgrounding",
             "--disable-backgrounding-occluded-windows",
             "--disable-features=Translate,OptimizationHints,MediaRouter",
-            "--disable-blink-features=AutomationControlled",
             "--window-size=1280,800",
         ]
-        if "vivaldi" in (browser_name or "").lower() or "vivaldi" in browser_path.lower():
-            args.extend(["--disable-gpu", "--disable-software-rasterizer"])
         if fingerprint:
             args.extend(build_fingerprint_args(fingerprint))
         if extension_path:
@@ -2257,7 +2291,19 @@ class BrowserContext:
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                found = await tab.evaluate("() => !!document.querySelector('input[name=\"email\"]')")
+                found = await tab.evaluate(
+                    '''() => {
+                        const el = document.querySelector('input[name="email"]');
+                        if (!el) return false;
+                        const st = window.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+                        return st.display !== "none"
+                            && st.visibility !== "hidden"
+                            && Number(st.opacity || "1") > 0
+                            && r.width > 0
+                            && r.height > 0;
+                    }'''
+                )
                 if found:
                     return True
             except Exception:
@@ -2385,6 +2431,9 @@ class AccountCreator:
                     f'''() => {{
                         const el = document.querySelector({selector_js});
                         if (!el) return false;
+                        const st = window.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+                        if (st.display === "none" || st.visibility === "hidden" || r.width < 1 || r.height < 1) return false;
                         el.focus();
                         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
                         if (setter) setter.call(el, {value_js});
@@ -2998,7 +3047,7 @@ async def main():
             return
 
     if not check_environment():
-        log_message("WARNING", "brave/chrome not found. install Brave for Discord pages to load")
+        log_message("WARNING", "Thorium/Chromium not found. install Thorium and set browser_path to thorium.exe")
 
     proxies = load_proxies(cfg)
 

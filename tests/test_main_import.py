@@ -337,3 +337,46 @@ assert cfg["browser_path"].endswith("vivaldi.exe")
 path.unlink()
 print("OK")
 ''')
+
+
+def test_auto_skips_brave_and_chrome_for_thorium():
+    _run_main_snippet('''
+from pathlib import Path
+import main
+
+inp = Path(main.get_path("input"))
+brave = inp / "brave.exe"
+chrome = inp / "chrome.exe"
+thorium = inp / "thorium.exe"
+for p in (brave, chrome, thorium):
+    p.write_bytes(b"MZ")
+main.BROWSER_EXECUTABLES = {
+    "brave": [str(brave)],
+    "chrome": [str(chrome)],
+    "thorium": [str(thorium)],
+    "chromium": [],
+    "arc": [],
+    "vivaldi": [],
+}
+main.configure_browser({"browser": "auto", "browser_path": ""})
+path, name = main.find_browser_path()
+assert path == str(thorium)
+assert name == "thorium"
+main.configure_browser({"browser": "auto", "browser_path": str(brave)})
+path, name = main.find_browser_path()
+assert path == str(thorium)
+for p in (brave, chrome, thorium):
+    p.unlink()
+print("OK")
+''')
+
+
+def test_browser_start_args_drop_automation_controlled():
+    _run_main_snippet('''
+import inspect
+import main
+src = inspect.getsource(main.BrowserContext.start)
+assert "AutomationControlled" not in src
+assert "disable-blink-features" not in src
+print("OK")
+''')
