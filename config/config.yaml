@@ -3,7 +3,8 @@ vpn_delay: 15
 cybertemp_key: ""
 draxon_key: ""
 hotmail007_key: "H7-1E6B7E9378A748FCBC91D59857F4C61D"
-hotmail007_mail_type: "hotmail"
+# Optional: product id from https://hotmail007.com products page. When set, /open/buy is used.
+hotmail007_product_id: ""
 zeusx_key: ""
 afham_mail_api9_key: ""
 duckmail_key: ""

@@ -88,6 +88,57 @@ print("OK")
 ''')
 
 
+def test_hotmail007_accepts_four_field_credentials_and_reads_provider_inbox():
+    _run_main_snippet('''
+import asyncio
+import main
+
+line = "mail@example.com:password:refresh-token:9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+verify = "https://discord.com/verify?token=" + ("a" * 40)
+
+class Response:
+    def __init__(self, payload, status_code=200):
+        self.status_code = status_code
+        self._payload = payload
+    def json(self):
+        return self._payload
+
+class Client:
+    calls = []
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, *args):
+        return None
+    async def get(self, url, params=None, **kwargs):
+        Client.calls.append((url, params or {}))
+        if "getMail" in url:
+            return Response({"success": True, "code": 0, "data": [line]})
+        if "mail/latest" in url or "getFirstMail" in url:
+            assert params["account"] == line
+            assert params["folder"] in ("inbox", "junkemail")
+            return Response({
+                "success": True,
+                "code": 0,
+                "data": {"from": "noreply@discord.com", "subject": "Verify", "html": f"<a href='{verify}'>x</a>", "text": ""},
+            })
+        raise AssertionError(url)
+
+main.httpx.AsyncClient = Client
+
+async def run():
+    provider = main.Hotmail007Provider("key", mail_type="hotmail Trusted")
+    assert provider.mail_type == "hotmail Trusted"
+    assert await provider.create_inbox() == "mail@example.com"
+    assert provider.refresh_token == "refresh-token"
+    assert provider.uuid == "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+    assert await provider.get_verification_url() == verify
+    assert any("open/mail/latest" in url for url, _ in Client.calls)
+
+asyncio.run(run())
+print("OK")
+''')
+
+
 def test_zeusx_rejects_invalid_payload_and_parses_records():
     _run_main_snippet('''
 import asyncio

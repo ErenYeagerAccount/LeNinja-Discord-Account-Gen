@@ -1007,10 +1007,47 @@ def response_json(response):
         return None
 
 
+def parse_colon_credentials(account):
+    """Parse email:password[:refreshToken:clientId], keeping the domain attached to the local part."""
+    account = str(account).strip().strip('"').strip("'")
+    if not account:
+        return None
+    at = account.find("@")
+    if at == -1:
+        return None
+    sep = account.find(":", at)
+    if sep == -1:
+        return None
+    email_addr = account[:sep].strip()
+    remainder = account[sep + 1:]
+    if not remainder:
+        return None
+    if ":" not in remainder:
+        password, refresh_token, uuid = remainder.strip(), None, None
+    else:
+        password, rest = remainder.split(":", 1)
+        password = password.strip()
+        rest = rest.strip()
+        if ":" in rest:
+            refresh_token, uuid = rest.rsplit(":", 1)
+            refresh_token = refresh_token.strip() or None
+            uuid = uuid.strip() or None
+        else:
+            refresh_token, uuid = rest or None, None
+    if email_addr and password and "@" in email_addr:
+        return email_addr, password, refresh_token, uuid
+    return None
+
+
 def parse_mailbox_account(account):
     """Parse a provider mailbox payload into email, password, refresh token, and client id."""
     email_addr = password = refresh_token = uuid = None
     if isinstance(account, dict):
+        raw = account.get("account") or account.get("mail") or account.get("line")
+        if isinstance(raw, str):
+            parsed = parse_colon_credentials(raw)
+            if parsed:
+                return parsed
         email_addr = account.get("email") or account.get("address") or account.get("username")
         password = account.get("password") or account.get("pass")
         refresh_token = (
@@ -1025,15 +1062,50 @@ def parse_mailbox_account(account):
             or account.get("uuid")
         )
     elif isinstance(account, str):
-        parts = [part.strip() for part in re.split(r"----|\||;|,|\t|\r?\n", account, maxsplit=3)]
-        if len(parts) < 2:
-            parts = [part.strip() for part in account.split(":", 3)]
+        parsed = parse_colon_credentials(account)
+        if parsed:
+            return parsed
+        parts = [part.strip() for part in re.split(r"----|\||;|\t|\r?\n", account, maxsplit=3)]
         if len(parts) >= 2 and "@" in parts[0] and all(parts[:2]):
             email_addr, password = parts[:2]
             refresh_token = parts[2] if len(parts) >= 3 and parts[2] else None
             uuid = parts[3] if len(parts) >= 4 and parts[3] else None
     if email_addr and password:
         return str(email_addr).strip(), str(password), refresh_token, uuid
+    return None
+
+
+def extract_discord_verify_link(content):
+    if not content:
+        return None
+    text = str(content).replace("&amp;", "&").replace("\\/", "/")
+    patterns = (
+        r"https?://(?:www\.)?discord\.com/verify\?token=[^\s\"'<>\\]+",
+        r"https?://click\.discord\.com/ls/click\?[^\s\"'<>\\]+",
+    )
+    found = []
+    for pattern in patterns:
+        for url in re.findall(pattern, text, re.IGNORECASE):
+            url = url.split("\n")[0].strip()
+            url = re.sub(r"[.,;>)]+$", "", url)
+            if len(url) > 50:
+                found.append(url)
+    if not found:
+        return None
+    verify_links = [link for link in found if "discord.com/verify" in link.lower()]
+    links = verify_links or found
+    links.sort(key=len, reverse=True)
+    return links[0]
+
+
+def hotmail007_error(data):
+    if not isinstance(data, dict):
+        return None
+    if data.get("success") is False:
+        return data.get("message") or data.get("msg") or "request rejected"
+    code = data.get("code")
+    if code not in (None, 0, "0", True, 200):
+        return data.get("message") or data.get("msg") or f"code {code}"
     return None
 
 
@@ -1288,19 +1360,33 @@ class MailboxClient:
         return None
 
 class Hotmail007Provider:
-    def __init__(self, client_key, mail_type="hotmail"):
+    def __init__(self, client_key, mail_type="hotmail", product_id=None):
         self.client_key = client_key
-        self.mail_type = "hotmail" if str(mail_type).strip().lower() == "8" else str(mail_type).strip().lower()
+        self.mail_type = "hotmail" if str(mail_type).strip().lower() == "8" else str(mail_type).strip()
+        self.product_id = product_id
         self.email = None
         self.password = None
         self.refresh_token = None
         self.uuid = None
-        self.base_api = "https://gapi.hotmail007.com/api"
+        self.account_line = None
+        self.mail_since = None
+        self.host = "https://gapi.hotmail007.com"
+        self.base_api = f"{self.host}/api"
         self.ms_client_id = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+
+    def credential_line(self):
+        if self.account_line:
+            return self.account_line
+        parts = [self.email, self.password, self.refresh_token, self.uuid or self.ms_client_id]
+        if not self.email or not self.password:
+            return None
+        return ":".join(str(part) for part in parts if part)
 
     async def get_access_token(self, r_token=None, c_id=None):
         try:
-            token = (r_token or self.refresh_token).rstrip("$")
+            token = (r_token or self.refresh_token or "").rstrip("$")
+            if not token:
+                return None
             cid = c_id or self.uuid or self.ms_client_id
             url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
             data = {
@@ -1317,11 +1403,33 @@ class Hotmail007Provider:
             pass
         return None
 
+    def _apply_account(self, account):
+        parsed = parse_mailbox_account(account)
+        if not parsed:
+            return None
+        self.email, self.password, self.refresh_token, self.uuid = parsed
+        if isinstance(account, str) and account.strip():
+            self.account_line = account.strip().strip('"').strip("'")
+        else:
+            self.account_line = self.credential_line()
+        self.mail_since = max(0, int(time.time()) - 5)
+        return self.email
+
     async def create_inbox(self):
-        url = f"{self.base_api}/mail/getMail?clientKey={self.client_key}&mailType={self.mail_type}&quantity=1"
         try:
             async with httpx.AsyncClient() as client:
-                r = await client.get(url, timeout=30)
+                if self.product_id:
+                    r = await client.get(
+                        f"{self.host}/open/buy",
+                        params={"clientKey": self.client_key, "productId": self.product_id, "quantity": 1},
+                        timeout=30,
+                    )
+                else:
+                    r = await client.get(
+                        f"{self.base_api}/mail/getMail",
+                        params={"clientKey": self.client_key, "mailType": self.mail_type, "quantity": 1},
+                        timeout=30,
+                    )
                 if r.status_code != 200:
                     log_message("ERROR", f"Hotmail007 request failed: HTTP {r.status_code}")
                     return None
@@ -1331,21 +1439,20 @@ class Hotmail007Provider:
                     log_message("ERROR", "Hotmail007 returned invalid JSON")
                     return None
 
-                if isinstance(data, dict) and data.get("success") is False:
-                    message = data.get("message") or data.get("msg") or "request rejected"
-                    log_message("ERROR", f"Hotmail007 rejected request: {message}")
+                rejected = hotmail007_error(data)
+                if rejected:
+                    log_message("ERROR", f"Hotmail007 rejected request: {rejected}")
                     return None
 
-                accounts = mailbox_records(data)
+                accounts = [item for item in mailbox_records(data) if item not in ("", None, [], {})]
                 if not accounts:
                     log_message("ERROR", "Hotmail007 returned no mailbox")
                     return None
 
                 account = accounts[0]
-                parsed = parse_mailbox_account(account)
-                if parsed:
-                    self.email, self.password, self.refresh_token, self.uuid = parsed
-                    return self.email
+                applied = self._apply_account(account)
+                if applied:
+                    return applied
 
                 shape = type(account).__name__
                 if isinstance(account, dict):
@@ -1359,6 +1466,62 @@ class Hotmail007Provider:
             log_message("ERROR", f"Hotmail007 connection failed: {type(e).__name__}")
         except Exception as e:
             log_message("ERROR", f"Hotmail007 mailbox error: {type(e).__name__}")
+        return None
+
+    def _mail_from_payload(self, payload):
+        if isinstance(payload, dict):
+            nested = payload.get("data")
+            if isinstance(nested, dict):
+                payload = nested
+            elif isinstance(nested, list) and nested:
+                payload = nested[0]
+        if not isinstance(payload, dict):
+            return extract_discord_verify_link(payload)
+        html = payload.get("html") or payload.get("body") or payload.get("content") or ""
+        text = payload.get("text") or payload.get("body_text") or ""
+        blob = "\n".join(
+            str(part) for part in (
+                payload.get("subject", ""),
+                payload.get("from", ""),
+                html,
+                text,
+            ) if part
+        )
+        return extract_discord_verify_link(blob)
+
+    async def get_provider_verification_url(self):
+        account = self.credential_line()
+        if not account:
+            return None
+        params = {
+            "clientKey": self.client_key,
+            "account": account,
+            "folder": "inbox",
+        }
+        if self.mail_since:
+            params["start_timestamp"] = self.mail_since
+        endpoints = (
+            f"{self.host}/open/mail/latest",
+            f"{self.host}/v1/mail/getFirstMail",
+        )
+        try:
+            async with httpx.AsyncClient() as client:
+                for folder in ("inbox", "junkemail"):
+                    params["folder"] = folder
+                    for endpoint in endpoints:
+                        r = await client.get(endpoint, params=params, timeout=20)
+                        if r.status_code != 200:
+                            continue
+                        data = response_json(r)
+                        if data is None:
+                            continue
+                        if hotmail007_error(data):
+                            continue
+                        link = self._mail_from_payload(data)
+                        if link:
+                            return link
+        except Exception as e:
+            log_message("WARNING", f"Hotmail007 inbox lookup failed: {type(e).__name__}")
         return None
 
     async def get_imap_verification_url(self):
@@ -1389,9 +1552,6 @@ class Hotmail007Provider:
                     message = email.message_from_bytes(raw_message)
                     subject = str(email.header.make_header(email.header.decode_header(message.get("Subject", "")))).lower()
                     sender = message.get("From", "").lower()
-                    if "discord" not in subject and "discord" not in sender:
-                        continue
-
                     body_parts = []
                     if message.is_multipart():
                         for part in message.walk():
@@ -1404,13 +1564,10 @@ class Hotmail007Provider:
                         if payload:
                             body_parts.append(payload.decode(message.get_content_charset() or "utf-8", errors="replace"))
 
-                    body = "\n".join(body_parts)
-                    matches = re.findall(r"https://discord\.com/verify\?token=[^\s\"'<>]+", body)
-                    if matches:
-                        return matches[0]
-                    tracked_links = re.findall(r"https://click\.discord\.com/ls/click\?[^\s\"'<>]+", body)
-                    if tracked_links:
-                        return tracked_links[0]
+                    body = "\n".join([subject, sender, *body_parts])
+                    link = extract_discord_verify_link(body)
+                    if link:
+                        return link
             finally:
                 try:
                     mailbox.logout()
@@ -1425,45 +1582,37 @@ class Hotmail007Provider:
             return None
 
     async def get_verification_url(self):
-        if not self.refresh_token:
+        link = await self.get_provider_verification_url()
+        if link:
+            return link
+        if self.refresh_token:
+            access = await self.get_access_token()
+            if access:
+                try:
+                    async with httpx.AsyncClient() as client:
+                        r = await client.get(
+                            "https://graph.microsoft.com/v1.0/me/messages",
+                            headers={"Authorization": f"Bearer {access}"},
+                            params={"$top": 10, "$orderby": "receivedDateTime desc", "$select": "subject,body,from"},
+                            timeout=15
+                        )
+                        if r.status_code == 200:
+                            for msg in r.json().get("value", []):
+                                subj = msg.get("subject", "").lower()
+                                from_data = msg.get("from", {}).get("emailAddress", {})
+                                frm_addr = from_data.get("address", "").lower()
+                                frm_name = from_data.get("name", "").lower()
+                                is_discord = "discord" in frm_addr or "discord" in frm_name
+                                has_verify = "verify" in subj or "confirm" in subj or "verification" in subj
+                                if is_discord and has_verify:
+                                    body = msg.get("body", {}).get("content", "")
+                                    link = extract_discord_verify_link(body)
+                                    if link:
+                                        return link
+                except Exception:
+                    pass
+        if not self.account_line:
             return await self.get_imap_verification_url()
-        access = await self.get_access_token()
-        if not access:
-            return None
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    "https://graph.microsoft.com/v1.0/me/messages",
-                    headers={"Authorization": f"Bearer {access}"},
-                    params={"$top": 10, "$orderby": "receivedDateTime desc", "$select": "subject,body,from"},
-                    timeout=15
-                )
-                if r.status_code == 200:
-                    for msg in r.json().get("value", []):
-                        subj = msg.get("subject", "").lower()
-                        from_data = msg.get("from", {}).get("emailAddress", {})
-                        frm_addr = from_data.get("address", "").lower()
-                        frm_name = from_data.get("name", "").lower()
-                        is_discord = "discord" in frm_addr or "discord" in frm_name
-                        has_verify = "verify" in subj or "confirm" in subj or "verification" in subj
-                        if is_discord and has_verify:
-                            body = msg.get("body", {}).get("content", "")
-                            body = body.replace("&amp;", "&").replace("&quot;", '"').replace("&#39;", "'")
-                            matches = re.findall(r'https://discord\.com/verify\?token=[^\s"\'><]+', body)
-                            if matches:
-                                return matches[0]
-                            tracked_links = re.findall(r'https://click\.discord\.com/ls/click\?[^\s"\'><]+', body)
-                            for link in tracked_links:
-                                try:
-                                    async with httpx.AsyncClient() as check_client:
-                                        res = await check_client.get(link, follow_redirects=False, timeout=10)
-                                        target = res.headers.get("Location", "")
-                                        if "discord.com/verify" in target:
-                                            return link
-                                except Exception:
-                                    continue
-        except Exception:
-            pass
         return None
 
 
@@ -2537,7 +2686,8 @@ async def main():
     if service == 'h':
         key = cfg.get('hotmail007_key')
         mail_type = str(cfg.get('hotmail007_mail_type', 'hotmail')).strip() or 'hotmail'
-        mailbox_class = lambda api_key: Hotmail007Provider(api_key, mail_type=mail_type)
+        product_id = cfg.get('hotmail007_product_id')
+        mailbox_class = lambda api_key: Hotmail007Provider(api_key, mail_type=mail_type, product_id=product_id)
     elif service == 'z':
         key = cfg.get('zeusx_key')
         mailbox_class = ZeusXProvider
