@@ -1623,6 +1623,56 @@ class MailboxClient:
                 pass
         return None
 
+HOTMAIL007_HOST = "https://gapi.hotmail007.com"
+HOTMAIL007_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def hotmail007_async_client():
+    """Direct IPv4 HTTPS. Ignore system proxies that cause ConnectError on Windows."""
+    headers = {"User-Agent": HOTMAIL007_UA, "Accept": "application/json"}
+    try:
+        timeout = httpx.Timeout(30.0, connect=8.0)
+        transport = httpx.AsyncHTTPTransport(retries=2, local_address="0.0.0.0")
+        return httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            trust_env=False,
+            headers=headers,
+            transport=transport,
+        )
+    except (TypeError, AttributeError):
+        return httpx.AsyncClient()
+
+
+async def hotmail007_get(url, params=None, timeout=30):
+    last_error = None
+    for attempt in range(3):
+        try:
+            async with hotmail007_async_client() as client:
+                return await client.get(url, params=params, timeout=timeout)
+        except httpx.RequestError as e:
+            last_error = e
+            if requests is not None:
+                try:
+                    return await run_blocking(
+                        requests.get,
+                        url,
+                        params=params,
+                        timeout=timeout,
+                        impersonate="chrome124",
+                        headers={"User-Agent": HOTMAIL007_UA, "Accept": "application/json"},
+                    )
+                except Exception as e2:
+                    last_error = e2
+            await asyncio.sleep(0.35 * (attempt + 1))
+    if last_error:
+        raise last_error
+    raise RuntimeError("Hotmail007 request failed")
+
+
 class Hotmail007Provider:
     def __init__(self, client_key, mail_type="hotmail", product_id=None):
         self.client_key = str(client_key or "").strip().strip('"').strip("'")
@@ -1639,7 +1689,7 @@ class Hotmail007Provider:
         self.uuid = None
         self.account_line = None
         self.mail_since = None
-        self.host = "https://gapi.hotmail007.com"
+        self.host = HOTMAIL007_HOST
         self.base_api = f"{self.host}/api"
         self.ms_client_id = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 
@@ -1702,13 +1752,13 @@ class Hotmail007Provider:
         self.mail_since = max(0, int(time.time()) - 5)
         return self.email
 
-    async def _resolve_product_id(self, client):
+    async def _resolve_product_id(self):
         known = self._product_id()
         if known:
             return known
         wanted = str(self.mail_type).strip().lower().replace(" ", "-")
         try:
-            r = await client.get(f"{self.host}/open/stock", timeout=20)
+            r = await hotmail007_get(f"{self.host}/open/stock", timeout=20)
             data = response_json(r) or {}
             products = data.get("data") if isinstance(data, dict) else None
             if not isinstance(products, list):
@@ -1739,67 +1789,75 @@ class Hotmail007Provider:
             log_message("ERROR", "Hotmail007 API key is empty. Set hotmail007_key in config/config.yaml")
             return None
         try:
-            async with httpx.AsyncClient() as client:
-                product_id = await self._resolve_product_id(client)
-                if product_id:
-                    r = await client.get(
-                        f"{self.host}/open/buy",
-                        params=self._auth_params({"productId": product_id, "quantity": 1}),
-                        timeout=30,
-                    )
-                else:
-                    r = await client.get(
-                        f"{self.base_api}/mail/getMail",
-                        params=self._auth_params({"mailType": self.mail_type, "quantity": 1}),
-                        timeout=30,
-                    )
-                if r.status_code != 200:
-                    log_message("ERROR", f"Hotmail007 request failed: HTTP {r.status_code}")
-                    return None
+            product_id = await self._resolve_product_id()
+            if product_id:
+                r = await hotmail007_get(
+                    f"{self.host}/open/buy",
+                    params=self._auth_params({"productId": product_id, "quantity": 1}),
+                    timeout=30,
+                )
+            else:
+                r = await hotmail007_get(
+                    f"{self.base_api}/mail/getMail",
+                    params=self._auth_params({"mailType": self.mail_type, "quantity": 1}),
+                    timeout=30,
+                )
+            if r.status_code != 200:
+                log_message("ERROR", f"Hotmail007 request failed: HTTP {r.status_code}")
+                return None
 
+            data = response_json(r)
+            if data is None:
+                log_message("ERROR", "Hotmail007 returned invalid JSON")
+                return None
+
+            rejected = hotmail007_error(data)
+            if rejected and product_id and "API key rejected" not in rejected:
+                r = await hotmail007_get(
+                    f"{self.base_api}/mail/getMail",
+                    params=self._auth_params({"mailType": self.mail_type, "quantity": 1}),
+                    timeout=30,
+                )
                 data = response_json(r)
-                if data is None:
-                    log_message("ERROR", "Hotmail007 returned invalid JSON")
-                    return None
+                rejected = hotmail007_error(data) if data else rejected
+            if rejected:
+                log_message("ERROR", f"Hotmail007 rejected request: {rejected}")
+                return None
+            if data is None:
+                log_message("ERROR", "Hotmail007 returned invalid JSON")
+                return None
 
-                rejected = hotmail007_error(data)
-                if rejected and product_id and "API key rejected" not in rejected:
-                    r = await client.get(
-                        f"{self.base_api}/mail/getMail",
-                        params=self._auth_params({"mailType": self.mail_type, "quantity": 1}),
-                        timeout=30,
-                    )
-                    data = response_json(r)
-                    rejected = hotmail007_error(data) if data else rejected
-                if rejected:
-                    log_message("ERROR", f"Hotmail007 rejected request: {rejected}")
-                    return None
-                if data is None:
-                    log_message("ERROR", "Hotmail007 returned invalid JSON")
-                    return None
+            accounts = [item for item in mailbox_records(data) if item not in ("", None, [], {})]
+            if not accounts:
+                log_message("ERROR", "Hotmail007 returned no mailbox")
+                return None
 
-                accounts = [item for item in mailbox_records(data) if item not in ("", None, [], {})]
-                if not accounts:
-                    log_message("ERROR", "Hotmail007 returned no mailbox")
-                    return None
+            account = accounts[0]
+            applied = self._apply_account(account)
+            if applied:
+                return applied
 
-                account = accounts[0]
-                applied = self._apply_account(account)
-                if applied:
-                    return applied
-
-                shape = type(account).__name__
-                if isinstance(account, dict):
-                    shape = f"object fields: {', '.join(sorted(account.keys()))}"
-                elif isinstance(account, str):
-                    separators = [separator for separator in ("----", "|", ";", ",", ":", "\\t", "\\n") if separator in account]
-                    field_lengths = [len(field.strip()) for field in re.split(r"----|\||;|,|\t|\r?\n|:", account)]
-                    shape = f"text with {len(account)} characters; separators={separators or ['none']}; field_lengths={field_lengths}"
-                log_message("ERROR", f"Hotmail007 returned unsupported mailbox format ({shape})")
+            shape = type(account).__name__
+            if isinstance(account, dict):
+                shape = f"object fields: {', '.join(sorted(account.keys()))}"
+            elif isinstance(account, str):
+                separators = [separator for separator in ("----", "|", ";", ",", ":", "\\t", "\\n") if separator in account]
+                field_lengths = [len(field.strip()) for field in re.split(r"----|\||;|,|\t|\r?\n|:", account)]
+                shape = f"text with {len(account)} characters; separators={separators or ['none']}; field_lengths={field_lengths}"
+            log_message("ERROR", f"Hotmail007 returned unsupported mailbox format ({shape})")
         except httpx.RequestError as e:
-            log_message("ERROR", f"Hotmail007 connection failed: {type(e).__name__}")
+            detail = str(e).strip() or type(e).__name__
+            log_message(
+                "ERROR",
+                f"Hotmail007 connection failed: {type(e).__name__} ({detail[:160]}). "
+                "gapi.hotmail007.com must be reachable without a system proxy; turn off Windows proxy/VPN and retry",
+            )
         except Exception as e:
-            log_message("ERROR", f"Hotmail007 mailbox error: {type(e).__name__}")
+            detail = str(e).strip() or type(e).__name__
+            log_message(
+                "ERROR",
+                f"Hotmail007 mailbox error: {type(e).__name__} ({detail[:160]})",
+            )
         return None
 
     def _mail_from_payload(self, payload):
@@ -1839,21 +1897,20 @@ class Hotmail007Provider:
             f"{self.host}/v1/mail/getFirstMail",
         )
         try:
-            async with httpx.AsyncClient() as client:
-                for folder in ("inbox", "junkemail"):
-                    params["folder"] = folder
-                    for endpoint in endpoints:
-                        r = await client.get(endpoint, params=params, timeout=20)
-                        if r.status_code != 200:
-                            continue
-                        data = response_json(r)
-                        if data is None:
-                            continue
-                        if hotmail007_error(data):
-                            continue
-                        link = self._mail_from_payload(data)
-                        if link:
-                            return link
+            for folder in ("inbox", "junkemail"):
+                params["folder"] = folder
+                for endpoint in endpoints:
+                    r = await hotmail007_get(endpoint, params=params, timeout=20)
+                    if r.status_code != 200:
+                        continue
+                    data = response_json(r)
+                    if data is None:
+                        continue
+                    if hotmail007_error(data):
+                        continue
+                    link = self._mail_from_payload(data)
+                    if link:
+                        return link
         except Exception as e:
             log_message("WARNING", f"Hotmail007 inbox lookup failed: {type(e).__name__}")
         return None

@@ -68,6 +68,8 @@ class Response:
         return {"success": True, "data": ["mail@example.com:password"]}
 
 class Client:
+    def __init__(self, *args, **kwargs):
+        pass
     async def __aenter__(self):
         return self
     async def __aexit__(self, *args):
@@ -105,6 +107,8 @@ class Response:
 
 class Client:
     calls = []
+    def __init__(self, *args, **kwargs):
+        pass
     async def __aenter__(self):
         return self
     async def __aexit__(self, *args):
