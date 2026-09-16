@@ -1,0 +1,13 @@
+vpn: false
+vpn_delay: 15
+cybertemp_key: ""
+draxon_key: ""
+hotmail007_key: "H7-1E6B7E9378A748FCBC91D59857F4C61D"
+hotmail007_mail_type: "hotmail"
+zeusx_key: ""
+afham_mail_api9_key: ""
+duckmail_key: ""
+crowmail_key: ""
+proxy:
+  enabled: true
+  file: input/proxies.txt
