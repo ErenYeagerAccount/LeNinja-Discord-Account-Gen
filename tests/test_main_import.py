@@ -339,7 +339,7 @@ print("OK")
 ''')
 
 
-def test_auto_skips_brave_and_chrome_for_thorium():
+def test_auto_prefers_ungoogled_chromium_over_brave_chrome_thorium():
     _run_main_snippet('''
 from pathlib import Path
 import main
@@ -348,24 +348,28 @@ inp = Path(main.get_path("input"))
 brave = inp / "brave.exe"
 chrome = inp / "chrome.exe"
 thorium = inp / "thorium.exe"
-for p in (brave, chrome, thorium):
+chromium = inp / "chromium-chrome.exe"
+for p in (brave, chrome, thorium, chromium):
     p.write_bytes(b"MZ")
 main.BROWSER_EXECUTABLES = {
     "brave": [str(brave)],
     "chrome": [str(chrome)],
     "thorium": [str(thorium)],
-    "chromium": [],
+    "chromium": [str(chromium)],
     "arc": [],
     "vivaldi": [],
 }
 main.configure_browser({"browser": "auto", "browser_path": ""})
 path, name = main.find_browser_path()
-assert path == str(thorium)
-assert name == "thorium"
+assert path == str(chromium)
+assert name == "chromium"
 main.configure_browser({"browser": "auto", "browser_path": str(brave)})
 path, name = main.find_browser_path()
-assert path == str(thorium)
-for p in (brave, chrome, thorium):
+assert path == str(chromium)
+main.configure_browser({"browser": "ungoogled-chromium", "browser_path": ""})
+path, name = main.find_browser_path()
+assert path == str(chromium)
+for p in (brave, chrome, thorium, chromium):
     p.unlink()
 print("OK")
 ''')

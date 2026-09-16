@@ -1,9 +1,9 @@
 vpn: false
 vpn_delay: 5
-# auto = Thorium, then Chromium, Arc, Vivaldi. Never Chrome/Brave/Edge.
+# auto = Ungoogled Chromium, then Vivaldi. Never Chrome/Brave/Edge/Thorium.
 browser: auto
 # Real .exe only. Start Menu .lnk files will not launch.
-# Example: 'C:\Users\YOU\AppData\Local\Thorium\Application\thorium.exe'
+# Example: 'C:\Users\YOU\AppData\Local\Chromium\Application\chrome.exe'
 browser_path: ""
 cybertemp_key: ""
 draxon_key: ""

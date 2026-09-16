@@ -480,24 +480,20 @@ async def setup_leninja(log_func=None):
 
 BROWSER_SETTINGS = {"name": "auto", "path": None}
 
-# Discord register blanks on Brave/Chrome/Edge with CDP + AutomationControlled.
-# Auto mode never launches those. Thorium is the default Chromium CDP target.
+# Discord register blanks on Brave/Chrome/Edge with CDP.
+# Auto mode uses Ungoogled Chromium (signed Chromium builds), then Vivaldi.
 BROWSER_EXECUTABLES = {
-    "thorium": [
-        r"C:\Program Files\Thorium\thorium.exe",
-        r"C:\Program Files\Thorium\Application\thorium.exe",
-        r"C:\Program Files (x86)\Thorium\Application\thorium.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Thorium\Application\thorium.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Thorium\thorium.exe"),
-        "/usr/bin/thorium-browser",
-        "/usr/bin/thorium",
-        "/opt/thorium/thorium",
-    ],
     "chromium": [
         r"C:\Program Files\Chromium\Application\chrome.exe",
         r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
+        r"C:\Program Files\Ungoogled Chromium\Application\chrome.exe",
+        r"C:\Program Files (x86)\Ungoogled Chromium\Application\chrome.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Chromium\Application\chrome.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Ungoogled Chromium\Application\chrome.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\ungoogled-chromium\Application\chrome.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Chromium\Application\chrome.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ungoogled Chromium\Application\chrome.exe"),
+        os.path.expandvars(r"%USERPROFILE%\scoop\apps\ungoogled-chromium\current\chrome.exe"),
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
         "/usr/bin/ungoogled-chromium",
@@ -514,6 +510,13 @@ BROWSER_EXECUTABLES = {
         "/usr/bin/vivaldi-stable",
         "/opt/vivaldi/vivaldi",
     ],
+    "thorium": [
+        r"C:\Program Files\Thorium\thorium.exe",
+        r"C:\Program Files\Thorium\Application\thorium.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Thorium\Application\thorium.exe"),
+        "/usr/bin/thorium-browser",
+        "/opt/thorium/thorium",
+    ],
     "brave": [
         r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
         r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
@@ -529,7 +532,7 @@ BROWSER_EXECUTABLES = {
         "/usr/bin/google-chrome-stable",
     ],
 }
-BROWSER_SEARCH_ORDER = ("thorium", "chromium", "arc", "vivaldi")
+BROWSER_SEARCH_ORDER = ("chromium", "vivaldi", "arc")
 BLOCKED_AUTO_BROWSERS = ("brave", "chrome", "msedge", "edge", "google-chrome")
 
 
@@ -606,7 +609,7 @@ def resolve_browser_executable(path):
     if path.lower().endswith(".lnk"):
         return resolve_shortcut_target(path)
     if os.path.isdir(path):
-        for name in ("thorium.exe", "chrome.exe", "vivaldi.exe", "Arc.exe", "brave.exe"):
+        for name in ("chrome.exe", "chromium.exe", "vivaldi.exe", "thorium.exe", "Arc.exe", "brave.exe"):
             for nested in (os.path.join(path, name), os.path.join(path, "Application", name)):
                 if is_browser_executable(nested):
                     return nested
@@ -616,7 +619,7 @@ def resolve_browser_executable(path):
     return None
 
 
-def browser_label(path, fallback="thorium"):
+def browser_label(path, fallback="chromium"):
     if not path:
         return fallback
     lower = path.lower()
@@ -663,6 +666,8 @@ def configure_browser(config=None):
 
 def find_browser_path(preferred=None, explicit_path=None):
     preferred = (preferred or BROWSER_SETTINGS.get("name") or "auto").strip().lower()
+    if preferred in ("ungoogled", "ungoogled-chromium", "ungoogled_chromium"):
+        preferred = "chromium"
     explicit_path = explicit_path if explicit_path is not None else BROWSER_SETTINGS.get("path")
 
     def first_preferred():
@@ -681,7 +686,7 @@ def find_browser_path(preferred=None, explicit_path=None):
         return None, preferred
 
     if preferred in BLOCKED_AUTO_BROWSERS:
-        log_message("WARNING", "Chrome, Brave, and Edge blank Discord register; using Thorium or Chromium instead")
+        log_message("WARNING", "Chrome, Brave, and Edge blank Discord register; using Ungoogled Chromium instead")
 
     if explicit_path:
         resolved = resolve_browser_executable(explicit_path)
@@ -694,14 +699,14 @@ def find_browser_path(preferred=None, explicit_path=None):
             if blocked:
                 log_message(
                     "WARNING",
-                    "Chrome/Brave/Edge cannot be used for Discord register; switching to Thorium/Chromium",
+                    "Chrome/Brave/Edge cannot be used for Discord register; switching to Ungoogled Chromium",
                 )
             return better, better_name
         if resolved and not blocked:
             return resolved, label or preferred
         log_message(
             "WARNING",
-            "browser_path is not a usable Thorium/Chromium .exe (Start Menu .lnk files are ignored)",
+            "browser_path is not a usable Chromium .exe (Start Menu .lnk files are ignored)",
         )
 
     found, name = first_preferred()
@@ -2231,7 +2236,7 @@ class BrowserContext:
         if not browser_path:
             log_message(
                 "ERROR",
-                "no supported browser found. install Thorium, then set browser_path to thorium.exe (not Chrome, Brave, Edge, or a .lnk)",
+                "no supported browser found. install Ungoogled Chromium, then set browser_path to chrome.exe under Chromium (not Google Chrome, Brave, Edge, Thorium, or a .lnk)",
             )
             return None
         if is_blocked_discord_browser(browser_path, browser_name):
@@ -3047,7 +3052,7 @@ async def main():
             return
 
     if not check_environment():
-        log_message("WARNING", "Thorium/Chromium not found. install Thorium and set browser_path to thorium.exe")
+        log_message("WARNING", "Ungoogled Chromium not found. install it and set browser_path to Chromium\\Application\\chrome.exe")
 
     proxies = load_proxies(cfg)
 
