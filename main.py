@@ -483,7 +483,6 @@ BROWSER_SETTINGS = {"name": "auto", "path": None}
 # Auto mode launches DuckDuckGo.exe only. chrome.exe is never started.
 BROWSER_EXECUTABLES = {
     "duckduckgo": [
-        os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\DuckDuckGo.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\DuckDuckGo.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\Application\DuckDuckGo.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\browser\DuckDuckGo.exe"),
@@ -618,13 +617,21 @@ def browser_label(path, fallback="duckduckgo"):
     return name or fallback
 
 
+def is_windowsapps_alias(path):
+    blob = str(path or "").lower().replace("/", "\\")
+    return "\\microsoft\\windowsapps\\" in blob
+
+
 def is_duckduckgo_executable(path):
-    if not path:
+    if not path or is_windowsapps_alias(path):
         return False
     path = os.path.expandvars(os.path.expanduser(str(path).strip().strip('"').strip("'")))
     base = os.path.splitext(os.path.basename(path))[0].lower()
     if base != "duckduckgo":
         return False
+    lower = path.lower().replace("/", "\\")
+    if "\\windowsbrowser\\duckduckgo.exe" in lower or "duckduckgo.desktopbrowser" in lower:
+        return True
     if is_browser_executable(path):
         return True
     try:
@@ -671,8 +678,18 @@ def duckduckgo_from_appx_package():
     if os.name != "nt":
         return []
     script = (
-        "$pkgs = Get-AppxPackage -Name '*DuckDuckGo*' -ErrorAction SilentlyContinue; "
-        "foreach ($p in @($pkgs)) { if ($p.InstallLocation) { $p.InstallLocation } }"
+        "$names = @('DuckDuckGo.DesktopBrowser','*DuckDuckGo*'); "
+        "$pkgs = foreach ($n in $names) { Get-AppxPackage -Name $n -ErrorAction SilentlyContinue }; "
+        "$pkgs = @($pkgs | Sort-Object PackageFullName -Unique); "
+        "foreach ($p in $pkgs) { "
+        "  if (-not $p.InstallLocation) { continue }; "
+        "  $cands = @("
+        "    (Join-Path $p.InstallLocation 'WindowsBrowser\\DuckDuckGo.exe'),"
+        "    (Join-Path $p.InstallLocation 'DuckDuckGo.exe'),"
+        "    (Join-Path $p.InstallLocation 'Application\\DuckDuckGo.exe')"
+        "  ); "
+        "  foreach ($c in $cands) { if (Test-Path -LiteralPath $c) { Write-Output $c } } "
+        "}"
     )
     try:
         completed = _run_windows_command(
@@ -683,29 +700,9 @@ def duckduckgo_from_appx_package():
         return []
     found = []
     for line in (completed.stdout or "").splitlines():
-        root = line.strip().strip('"')
-        if not root:
-            continue
-        for candidate in (
-            os.path.join(root, "WindowsBrowser", "DuckDuckGo.exe"),
-            os.path.join(root, "DuckDuckGo.exe"),
-            os.path.join(root, "Application", "DuckDuckGo.exe"),
-        ):
-            if is_duckduckgo_executable(candidate):
-                found.append(candidate)
-        if os.path.isdir(root):
-            try:
-                for dirpath, dirnames, filenames in os.walk(root):
-                    if dirpath[len(root):].count(os.sep) > 3:
-                        dirnames.clear()
-                        continue
-                    for filename in filenames:
-                        if filename.lower() == "duckduckgo.exe":
-                            full = os.path.join(dirpath, filename)
-                            if is_duckduckgo_executable(full):
-                                found.append(full)
-            except OSError:
-                pass
+        candidate = line.strip().strip('"')
+        if candidate and is_duckduckgo_executable(candidate):
+            found.append(candidate)
     return found
 
 
@@ -781,7 +778,11 @@ def find_browser_path(preferred=None, explicit_path=None):
             + list(duckduckgo_from_where())
         )
         for path in candidates:
+            if is_windowsapps_alias(path):
+                continue
             resolved = resolve_browser_executable(path)
+            if resolved and is_windowsapps_alias(resolved):
+                continue
             if resolved and is_duckduckgo_executable(resolved):
                 return resolved, "duckduckgo"
             if is_duckduckgo_executable(path):
@@ -790,12 +791,18 @@ def find_browser_path(preferred=None, explicit_path=None):
 
     if explicit_path:
         resolved = resolve_browser_executable(explicit_path)
-        if resolved and is_duckduckgo_executable(resolved):
+        if resolved and is_duckduckgo_executable(resolved) and not is_windowsapps_alias(resolved):
             return resolved, "duckduckgo"
-        log_message(
-            "WARNING",
-            "browser_path is not DuckDuckGo.exe (Chrome is blocked). Searching for DuckDuckGo Browser",
-        )
+        if is_windowsapps_alias(explicit_path) or is_windowsapps_alias(resolved or ""):
+            log_message(
+                "WARNING",
+                "WindowsApps\\DuckDuckGo.exe is a Store stub and cannot be automated; searching for WindowsBrowser\\DuckDuckGo.exe",
+            )
+        else:
+            log_message(
+                "WARNING",
+                "browser_path is not DuckDuckGo.exe (Chrome is blocked). Searching for DuckDuckGo Browser",
+            )
 
     found, name = first_duckduckgo()
     if found:
@@ -2381,7 +2388,8 @@ class BrowserContext:
         if not browser_path:
             log_message(
                 "ERROR",
-                "no supported browser found. install DuckDuckGo Browser, then set browser_path to DuckDuckGo.exe (not Chrome, Brave, Edge, or a .lnk)",
+                "no automatable DuckDuckGo.exe found. the Store shortcut in WindowsApps cannot be used. "
+                "set browser_path to ...\\WindowsBrowser\\DuckDuckGo.exe from Get-AppxPackage DuckDuckGo.DesktopBrowser",
             )
             return None
         if not is_duckduckgo_executable(browser_path):
@@ -2406,14 +2414,31 @@ class BrowserContext:
 
         try:
             log_message("INFO", f"using duckduckgo: {browser_path}")
+            profile_dir = str(Path(get_path("data")) / "ddg-profile")
+            Path(profile_dir).mkdir(parents=True, exist_ok=True)
+            td = get_truedriver()
             start_kwargs = {
-                "browser_executable_path": os.path.abspath(browser_path),
+                "browser_executable_path": browser_path,
                 "browser_args": args,
                 "headless": False,
+                "sandbox": False,
+                "user_data_dir": profile_dir,
+                "browser_connection_timeout": 0.5,
+                "browser_connection_max_tries": 40,
             }
             if proxy:
                 start_kwargs["proxy"] = proxy
-            self.driver = await get_truedriver().start(**start_kwargs)
+            config = None
+            if hasattr(td, "Config"):
+                config = td.Config(**start_kwargs)
+                defaults = getattr(config, "_default_browser_args", None)
+                if isinstance(defaults, list):
+                    config._default_browser_args = [
+                        flag for flag in defaults if "AutomationControlled" not in flag
+                    ]
+                self.driver = await td.start(config)
+            else:
+                self.driver = await td.start(**start_kwargs)
             tab = await self.driver.get(url)
             try:
                 await tab.wait_for_ready_state('complete', timeout=12000)

@@ -390,12 +390,33 @@ print("OK")
 ''')
 
 
-def test_default_duckduckgo_search_includes_windowsapps_alias():
+def test_windowsapps_alias_is_not_used_for_cdp():
     _run_main_snippet('''
+from pathlib import Path
 import main
-joined = " ".join(main.BROWSER_EXECUTABLES["duckduckgo"]).lower()
-assert "windowsapps" in joined
-assert "duckduckgo.exe" in joined
+
+alias = r"C:\\Users\\TUSHAR\\AppData\\Local\\Microsoft\\WindowsApps\\DuckDuckGo.exe"
+assert main.is_windowsapps_alias(alias)
+assert not main.is_duckduckgo_executable(alias)
+inp = Path(main.get_path("input"))
+real = inp / "DuckDuckGo.exe"
+real.write_bytes(b"MZ")
+main.BROWSER_EXECUTABLES = {"duckduckgo": [alias, str(real)]}
+main.configure_browser({"browser": "duckduckgo", "browser_path": alias})
+path, name = main.find_browser_path()
+assert path == str(real)
+assert "windowsapps" not in path.lower()
+real.unlink()
+print("OK")
+''')
+
+
+def test_default_duckduckgo_search_skips_store_stub():
+    _run_main_snippet('''
+import inspect
+import main
+src = inspect.getsource(main.find_browser_path)
+assert "is_windowsapps_alias" in src
 print("OK")
 ''')
 
@@ -405,7 +426,7 @@ def test_browser_start_args_drop_automation_controlled():
 import inspect
 import main
 src = inspect.getsource(main.BrowserContext.start)
-assert "AutomationControlled" not in src
-assert "disable-blink-features" not in src
+assert "AutomationControlled" in src
+assert 'flag for flag in defaults if "AutomationControlled" not in flag' in src
 print("OK")
 ''')
