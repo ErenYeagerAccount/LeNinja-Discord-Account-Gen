@@ -1,17 +1,14 @@
 vpn: false
 vpn_delay: 15
-# Chromium-based, not Chrome/Edge/Brave/Opera/Firefox. Recommended: vivaldi
-# Other options: thorium, chromium, arc
-browser: vivaldi
-# Use single quotes for Windows paths. Double quotes break on \Users
-# Example: browser_path: 'C:\Users\TUSHAR\AppData\Local\Vivaldi\Application\vivaldi.exe'
-# Do not use a Start Menu .lnk shortcut.
+# auto = Brave, then Chrome (Vivaldi often shows a blank Discord page)
+browser: auto
+# Optional .exe path. Do not use a Start Menu .lnk
+# Example: 'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe'
 browser_path: ""
 cybertemp_key: ""
 draxon_key: ""
 hotmail007_key: ""
 hotmail007_mail_type: "hotmail"
-# Optional: product id from https://hotmail007.com (1=Hotmail, 7=Hotmail Trusted Graph, 8=Outlook Trusted Graph)
 hotmail007_product_id: ""
 zeusx_key: ""
 afham_mail_api9_key: ""

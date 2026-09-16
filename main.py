@@ -478,24 +478,23 @@ async def setup_leninja(log_func=None):
     return ext_path
 
 
-BROWSER_SETTINGS = {"name": "vivaldi", "path": None}
+BROWSER_SETTINGS = {"name": "auto", "path": None}
 
-# Chromium-family browsers that are not Chrome, Edge, Brave, Opera, Firefox, or DuckDuckGo.
+# Prefer browsers that actually render Discord. Vivaldi often stays on a white page.
 BROWSER_EXECUTABLES = {
-    "vivaldi": [
-        r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
-        r"C:\Program Files (x86)\Vivaldi\Application\vivaldi.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe"),
-        "/usr/bin/vivaldi",
-        "/usr/bin/vivaldi-stable",
-        "/opt/vivaldi/vivaldi",
+    "brave": [
+        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        "/usr/bin/brave-browser",
+        "/usr/bin/brave",
     ],
-    "thorium": [
-        r"C:\Program Files\Thorium\thorium.exe",
-        r"C:\Program Files\Thorium\Application\thorium.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Thorium\Application\thorium.exe"),
-        "/usr/bin/thorium-browser",
-        "/opt/thorium/thorium",
+    "chrome": [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
     ],
     "chromium": [
         r"C:\Program Files\Chromium\Application\chrome.exe",
@@ -505,12 +504,28 @@ BROWSER_EXECUTABLES = {
         "/usr/bin/chromium-browser",
         "/usr/bin/ungoogled-chromium",
     ],
+    "thorium": [
+        r"C:\Program Files\Thorium\thorium.exe",
+        r"C:\Program Files\Thorium\Application\thorium.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Thorium\Application\thorium.exe"),
+        "/usr/bin/thorium-browser",
+        "/opt/thorium/thorium",
+    ],
     "arc": [
         os.path.expandvars(r"%LOCALAPPDATA%\Arc\Application\Arc.exe"),
         "/Applications/Arc.app/Contents/MacOS/Arc",
     ],
+    "vivaldi": [
+        r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
+        r"C:\Program Files (x86)\Vivaldi\Application\vivaldi.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe"),
+        "/usr/bin/vivaldi",
+        "/usr/bin/vivaldi-stable",
+        "/opt/vivaldi/vivaldi",
+    ],
 }
-BROWSER_SEARCH_ORDER = ("vivaldi", "thorium", "chromium", "arc")
+BROWSER_SEARCH_ORDER = ("brave", "chrome", "chromium", "thorium", "arc", "vivaldi")
+SLOW_DISCORD_BROWSERS = ("vivaldi",)
 
 
 def first_existing_path(paths):
@@ -586,7 +601,7 @@ def resolve_browser_executable(path):
     if path.lower().endswith(".lnk"):
         return resolve_shortcut_target(path)
     if os.path.isdir(path):
-        for name in ("vivaldi.exe", "thorium.exe", "chrome.exe", "Arc.exe"):
+        for name in ("brave.exe", "chrome.exe", "vivaldi.exe", "thorium.exe", "Arc.exe"):
             for nested in (os.path.join(path, name), os.path.join(path, "Application", name)):
                 if is_browser_executable(nested):
                     return nested
@@ -611,7 +626,7 @@ def browser_label(path, fallback="vivaldi"):
 
 def configure_browser(config=None):
     config = config or {}
-    name = str(config.get("browser") or "vivaldi").strip().lower() or "vivaldi"
+    name = str(config.get("browser") or "auto").strip().lower() or "auto"
     explicit = str(config.get("browser_path") or "").strip().strip('"').strip("'") or None
     BROWSER_SETTINGS["name"] = name
     BROWSER_SETTINGS["path"] = explicit
@@ -619,26 +634,45 @@ def configure_browser(config=None):
 
 
 def find_browser_path(preferred=None, explicit_path=None):
-    preferred = (preferred or BROWSER_SETTINGS.get("name") or "vivaldi").strip().lower()
+    preferred = (preferred or BROWSER_SETTINGS.get("name") or "auto").strip().lower()
     explicit_path = explicit_path if explicit_path is not None else BROWSER_SETTINGS.get("path")
+
+    def first_preferred():
+        order = BROWSER_SEARCH_ORDER if preferred in ("auto", "any", "") else (preferred,) + BROWSER_SEARCH_ORDER
+        seen = set()
+        for name in order:
+            if name in seen or name not in BROWSER_EXECUTABLES:
+                continue
+            seen.add(name)
+            found = first_existing_path(BROWSER_EXECUTABLES[name])
+            if found:
+                return found, name
+        return None, preferred
+
     if explicit_path:
         resolved = resolve_browser_executable(explicit_path)
+        label = browser_label(resolved, preferred) if resolved else ""
+        slow = bool(resolved) and (
+            (label or "").lower() == "vivaldi"
+            or os.path.splitext(os.path.basename(resolved))[0].lower() == "vivaldi"
+        )
+        if resolved and not slow:
+            return resolved, label
+        better, better_name = first_preferred()
+        if better and (not resolved or os.path.normcase(better) != os.path.normcase(resolved)):
+            if slow:
+                log_message("WARNING", "vivaldi often shows a blank Discord page; switching to a faster Chromium browser")
+            return better, better_name
         if resolved:
-            return resolved, browser_label(resolved, preferred)
+            return resolved, label or preferred
         log_message(
             "WARNING",
-            "browser_path is not an .exe (Start Menu .lnk shortcuts cannot be launched). Searching for Vivaldi instead",
+            "browser_path is not a usable .exe. Searching for Brave or Chrome instead",
         )
 
-    if preferred in BROWSER_EXECUTABLES:
-        found = first_existing_path(BROWSER_EXECUTABLES[preferred])
-        if found:
-            return found, preferred
-
-    for name in BROWSER_SEARCH_ORDER:
-        found = first_existing_path(BROWSER_EXECUTABLES[name])
-        if found:
-            return found, name
+    found, name = first_preferred()
+    if found:
+        return found, name
     return None, preferred
 
 
@@ -2163,16 +2197,28 @@ class BrowserContext:
         if not browser_path:
             log_message(
                 "ERROR",
-                "no supported browser found. install Vivaldi (recommended) or set browser_path in config/config.yaml",
+                "no supported browser found. install Brave (recommended) or Chrome, then set browser_path to the .exe",
             )
             return None
 
-        args = ["--lang=en-US"]
+        args = [
+            "--lang=en-US",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-hang-monitor",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-features=Translate,OptimizationHints,MediaRouter",
+            "--disable-blink-features=AutomationControlled",
+            "--window-size=1280,800",
+        ]
+        if "vivaldi" in (browser_name or "").lower() or "vivaldi" in browser_path.lower():
+            args.extend(["--disable-gpu", "--disable-software-rasterizer"])
         if fingerprint:
             args.extend(build_fingerprint_args(fingerprint))
         if extension_path:
             args.append(f"--load-extension={extension_path}")
-            args.append(f"--disable-extensions-except={extension_path}")
 
         try:
             log_message("INFO", f"using {browser_name}: {browser_path}")
@@ -2182,15 +2228,42 @@ class BrowserContext:
                 proxy=proxy
             )
             tab = await self.driver.get(url)
-            await tab.wait_for_ready_state('complete', timeout=30000)
+            try:
+                await tab.wait_for_ready_state('complete', timeout=45000)
+            except Exception:
+                pass
+            ready = await self.wait_for_registration_form(tab)
+            if not ready:
+                log_message("WARNING", "discord register page did not render; reloading once")
+                try:
+                    await tab.reload()
+                    await tab.wait_for_ready_state('complete', timeout=45000)
+                except Exception:
+                    pass
+                ready = await self.wait_for_registration_form(tab)
             try:
                 await tab.evaluate(JS_UTILS)
             except:
                 pass
+            if not ready:
+                log_message("ERROR", "discord page stayed blank (no registration form)")
+                return None
             return tab
         except Exception as e:
             log_message("ERROR", f"browser start failed: {str(e)}")
             return None
+
+    async def wait_for_registration_form(self, tab, timeout=40):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                found = await tab.evaluate("() => !!document.querySelector('input[name=\"email\"]')")
+                if found:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        return False
 
     async def stop(self):
         if self.driver:
@@ -2361,6 +2434,7 @@ class AccountCreator:
                 await self.clear_and_type(page, 'input[name="email"]', email, timeout=45)
                 await asyncio.sleep(random.uniform(0.05, 0.15))
             except Exception as e:
+                log_message("ERROR", "form failed: registration fields never appeared")
                 return False
             try:
                 await self.clear_and_type(page, 'input[name="global_name"]', display_name, timeout=20)
@@ -2941,7 +3015,7 @@ async def main():
             return
 
     if not check_environment():
-        log_message("WARNING", "vivaldi/thorium/chromium not found. install Vivaldi or set browser_path")
+        log_message("WARNING", "brave/chrome not found. install Brave for Discord pages to load")
 
     proxies = load_proxies(cfg)
 
