@@ -1101,12 +1101,17 @@ def extract_discord_verify_link(content):
 def hotmail007_error(data):
     if not isinstance(data, dict):
         return None
-    if data.get("success") is False:
-        return data.get("message") or data.get("msg") or "request rejected"
+    message = data.get("message") or data.get("msg") or ""
     code = data.get("code")
-    if code not in (None, 0, "0", True, 200):
-        return data.get("message") or data.get("msg") or f"code {code}"
-    return None
+    failed = data.get("success") is False or code not in (None, 0, "0", True, 200)
+    if not failed:
+        return None
+    if code in (20011, "20011") or "authentication failed" in str(message).lower():
+        return (
+            "API key rejected by Hotmail007. Put a current clientKey in "
+            "config/config.yaml (hotmail007_key) from https://hotmail007.com"
+        )
+    return message or f"code {code}"
 
 
 def mailbox_records(payload):
@@ -1361,9 +1366,14 @@ class MailboxClient:
 
 class Hotmail007Provider:
     def __init__(self, client_key, mail_type="hotmail", product_id=None):
-        self.client_key = client_key
-        self.mail_type = "hotmail" if str(mail_type).strip().lower() == "8" else str(mail_type).strip()
-        self.product_id = product_id
+        self.client_key = str(client_key or "").strip().strip('"').strip("'")
+        raw_type = str(mail_type or "hotmail").strip()
+        if raw_type.lower() == "8" or raw_type.isdigit():
+            self.mail_type = raw_type
+            self.product_id = int(raw_type) if product_id in (None, "", 0, "0") else product_id
+        else:
+            self.mail_type = raw_type
+            self.product_id = product_id
         self.email = None
         self.password = None
         self.refresh_token = None
@@ -1373,6 +1383,24 @@ class Hotmail007Provider:
         self.host = "https://gapi.hotmail007.com"
         self.base_api = f"{self.host}/api"
         self.ms_client_id = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+
+    def _product_id(self):
+        raw = self.product_id
+        if raw in (None, "", 0, "0"):
+            mail_type = str(self.mail_type).strip()
+            if mail_type.isdigit():
+                return int(mail_type)
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _auth_params(self, extra=None):
+        params = {"clientKey": self.client_key}
+        if extra:
+            params.update(extra)
+        return params
 
     def credential_line(self):
         if self.account_line:
@@ -1415,19 +1443,55 @@ class Hotmail007Provider:
         self.mail_since = max(0, int(time.time()) - 5)
         return self.email
 
+    async def _resolve_product_id(self, client):
+        known = self._product_id()
+        if known:
+            return known
+        wanted = str(self.mail_type).strip().lower().replace(" ", "-")
+        try:
+            r = await client.get(f"{self.host}/open/stock", timeout=20)
+            data = response_json(r) or {}
+            products = data.get("data") if isinstance(data, dict) else None
+            if not isinstance(products, list):
+                return None
+            matches = []
+            for item in products:
+                if not isinstance(item, dict):
+                    continue
+                mail_type = str(item.get("mailType") or "").strip().lower().replace(" ", "-")
+                name = str(item.get("name") or "").strip().lower().replace(" ", "-")
+                if wanted in (mail_type, name) or mail_type == wanted:
+                    try:
+                        stock = int(item.get("stock") or 0)
+                    except (TypeError, ValueError):
+                        stock = 0
+                    matches.append((stock, item.get("productId")))
+            in_stock = [pid for stock, pid in matches if stock > 0 and pid not in (None, "")]
+            if in_stock:
+                return in_stock[0]
+            if matches and matches[0][1] not in (None, ""):
+                return matches[0][1]
+        except Exception:
+            return None
+        return None
+
     async def create_inbox(self):
+        if not self.client_key:
+            log_message("ERROR", "Hotmail007 API key is empty. Set hotmail007_key in config/config.yaml")
+            return None
         try:
             async with httpx.AsyncClient() as client:
-                if self.product_id:
+                product_id = await self._resolve_product_id(client)
+                if product_id:
                     r = await client.get(
                         f"{self.host}/open/buy",
-                        params={"clientKey": self.client_key, "productId": self.product_id, "quantity": 1},
+                        params=self._auth_params({"productId": product_id, "quantity": 1}),
                         timeout=30,
                     )
                 else:
                     r = await client.get(
                         f"{self.base_api}/mail/getMail",
-                        params={"clientKey": self.client_key, "mailType": self.mail_type, "quantity": 1},
+                        params=self._auth_params({"mailType": self.mail_type, "quantity": 1}),
                         timeout=30,
                     )
                 if r.status_code != 200:
@@ -1440,8 +1504,19 @@ class Hotmail007Provider:
                     return None
 
                 rejected = hotmail007_error(data)
+                if rejected and product_id and "API key rejected" not in rejected:
+                    r = await client.get(
+                        f"{self.base_api}/mail/getMail",
+                        params=self._auth_params({"mailType": self.mail_type, "quantity": 1}),
+                        timeout=30,
+                    )
+                    data = response_json(r)
+                    rejected = hotmail007_error(data) if data else rejected
                 if rejected:
                     log_message("ERROR", f"Hotmail007 rejected request: {rejected}")
+                    return None
+                if data is None:
+                    log_message("ERROR", "Hotmail007 returned invalid JSON")
                     return None
 
                 accounts = [item for item in mailbox_records(data) if item not in ("", None, [], {})]
@@ -2684,7 +2759,7 @@ async def main():
     
     service = prompt_user("Service:").strip().lower()
     if service == 'h':
-        key = cfg.get('hotmail007_key')
+        key = str(cfg.get('hotmail007_key') or "").strip().strip('"').strip("'")
         mail_type = str(cfg.get('hotmail007_mail_type', 'hotmail')).strip() or 'hotmail'
         product_id = cfg.get('hotmail007_product_id')
         mailbox_class = lambda api_key: Hotmail007Provider(api_key, mail_type=mail_type, product_id=product_id)

@@ -51,7 +51,7 @@ print("OK")
 def test_hotmail007_uses_named_mail_type():
     _run_main_snippet('''
 import main
-assert main.Hotmail007Provider("key", mail_type="8").mail_type == "hotmail"
+assert main.Hotmail007Provider("key", mail_type="8").product_id == 8
 assert main.Hotmail007Provider("key", mail_type="hotmail").mail_type == "hotmail"
 print("OK")
 ''')
@@ -111,7 +111,11 @@ class Client:
         return None
     async def get(self, url, params=None, **kwargs):
         Client.calls.append((url, params or {}))
-        if "getMail" in url:
+        if "stock" in url:
+            return Response({"success": True, "code": 0, "data": [
+                {"productId": "5", "mailType": "hotmail-trusted", "name": "Hotmail Trusted", "stock": 3},
+            ]})
+        if "getMail" in url or "open/buy" in url:
             return Response({"success": True, "code": 0, "data": [line]})
         if "mail/latest" in url or "getFirstMail" in url:
             assert params["account"] == line
