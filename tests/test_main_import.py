@@ -390,6 +390,16 @@ print("OK")
 ''')
 
 
+def test_default_duckduckgo_search_includes_windowsapps_alias():
+    _run_main_snippet('''
+import main
+joined = " ".join(main.BROWSER_EXECUTABLES["duckduckgo"]).lower()
+assert "windowsapps" in joined
+assert "duckduckgo.exe" in joined
+print("OK")
+''')
+
+
 def test_browser_start_args_drop_automation_controlled():
     _run_main_snippet('''
 import inspect

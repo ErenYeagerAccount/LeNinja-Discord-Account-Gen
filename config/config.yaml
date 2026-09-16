@@ -2,7 +2,8 @@ vpn: false
 vpn_delay: 5
 # Always DuckDuckGo.exe. Chrome/Brave/Edge paths are ignored.
 browser: duckduckgo
-# Example: 'C:\Users\YOU\AppData\Local\DuckDuckGo\DuckDuckGo.exe'
+# winget/Store install is usually this App Execution Alias:
+# Example: 'C:\Users\YOU\AppData\Local\Microsoft\WindowsApps\DuckDuckGo.exe'
 browser_path: ""
 cybertemp_key: ""
 draxon_key: ""

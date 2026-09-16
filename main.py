@@ -483,6 +483,7 @@ BROWSER_SETTINGS = {"name": "auto", "path": None}
 # Auto mode launches DuckDuckGo.exe only. chrome.exe is never started.
 BROWSER_EXECUTABLES = {
     "duckduckgo": [
+        os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\DuckDuckGo.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\DuckDuckGo.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\Application\DuckDuckGo.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\browser\DuckDuckGo.exe"),
@@ -620,10 +621,16 @@ def browser_label(path, fallback="duckduckgo"):
 def is_duckduckgo_executable(path):
     if not path:
         return False
-    base = os.path.splitext(os.path.basename(str(path)))[0].lower()
+    path = os.path.expandvars(os.path.expanduser(str(path).strip().strip('"').strip("'")))
+    base = os.path.splitext(os.path.basename(path))[0].lower()
     if base != "duckduckgo":
         return False
-    return is_browser_executable(path) or str(path).lower().endswith(".exe")
+    if is_browser_executable(path):
+        return True
+    try:
+        return os.path.exists(path) and path.lower().endswith(".exe")
+    except OSError:
+        return False
 
 
 def is_blocked_discord_browser(path, name=""):
@@ -649,6 +656,80 @@ def configure_browser(config=None):
     return BROWSER_SETTINGS
 
 
+def _run_windows_command(command, timeout=15):
+    kwargs = {
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x08000000
+    return subprocess.run(command, **kwargs)
+
+
+def duckduckgo_from_appx_package():
+    if os.name != "nt":
+        return []
+    script = (
+        "$pkgs = Get-AppxPackage -Name '*DuckDuckGo*' -ErrorAction SilentlyContinue; "
+        "foreach ($p in @($pkgs)) { if ($p.InstallLocation) { $p.InstallLocation } }"
+    )
+    try:
+        completed = _run_windows_command(
+            ["powershell", "-NoProfile", "-Command", script],
+            timeout=20,
+        )
+    except Exception:
+        return []
+    found = []
+    for line in (completed.stdout or "").splitlines():
+        root = line.strip().strip('"')
+        if not root:
+            continue
+        for candidate in (
+            os.path.join(root, "WindowsBrowser", "DuckDuckGo.exe"),
+            os.path.join(root, "DuckDuckGo.exe"),
+            os.path.join(root, "Application", "DuckDuckGo.exe"),
+        ):
+            if is_duckduckgo_executable(candidate):
+                found.append(candidate)
+        if os.path.isdir(root):
+            try:
+                for dirpath, dirnames, filenames in os.walk(root):
+                    if dirpath[len(root):].count(os.sep) > 3:
+                        dirnames.clear()
+                        continue
+                    for filename in filenames:
+                        if filename.lower() == "duckduckgo.exe":
+                            full = os.path.join(dirpath, filename)
+                            if is_duckduckgo_executable(full):
+                                found.append(full)
+            except OSError:
+                pass
+    return found
+
+
+def duckduckgo_from_where():
+    names = ["DuckDuckGo.exe", "duckduckgo.exe"]
+    found = []
+    which = getattr(shutil, "which", None)
+    if which:
+        for name in names:
+            located = which(name)
+            if located and is_duckduckgo_executable(located):
+                found.append(located)
+    if os.name == "nt":
+        try:
+            completed = _run_windows_command(["where.exe", "DuckDuckGo.exe"], timeout=10)
+            for line in (completed.stdout or "").splitlines():
+                located = line.strip().strip('"')
+                if located and is_duckduckgo_executable(located):
+                    found.append(located)
+        except Exception:
+            pass
+    return found
+
+
 def discover_duckduckgo_executables():
     found = []
     seen = set()
@@ -657,6 +738,7 @@ def discover_duckduckgo_executables():
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\DuckDuckGo"),
         r"C:\Program Files\DuckDuckGo",
         r"C:\Program Files (x86)\DuckDuckGo",
+        os.path.expandvars(r"%PROGRAMFILES%\WindowsApps"),
     ]
     for root in roots:
         if not root or not os.path.isdir(root):
@@ -664,14 +746,20 @@ def discover_duckduckgo_executables():
         try:
             for dirpath, dirnames, filenames in os.walk(root):
                 depth = dirpath[len(root):].count(os.sep)
-                if depth > 5:
+                limit = 6 if "windowsapps" in root.lower() else 5
+                if depth > limit:
                     dirnames.clear()
                     continue
+                if "windowsapps" in root.lower() and "duckduckgo" not in dirpath.lower() and depth > 1:
+                    dirnames[:] = [name for name in dirnames if "duckduckgo" in name.lower()]
                 for filename in filenames:
                     if filename.lower() != "duckduckgo.exe":
                         continue
                     full = os.path.join(dirpath, filename)
-                    key = os.path.normcase(os.path.abspath(full))
+                    try:
+                        key = os.path.normcase(os.path.abspath(full))
+                    except OSError:
+                        continue
                     if key in seen:
                         continue
                     if is_duckduckgo_executable(full):
@@ -686,11 +774,18 @@ def find_browser_path(preferred=None, explicit_path=None):
     explicit_path = explicit_path if explicit_path is not None else BROWSER_SETTINGS.get("path")
 
     def first_duckduckgo():
-        listed = list(BROWSER_EXECUTABLES.get("duckduckgo") or [])
-        for path in listed + discover_duckduckgo_executables():
+        candidates = (
+            list(duckduckgo_from_appx_package())
+            + list(BROWSER_EXECUTABLES.get("duckduckgo") or [])
+            + list(discover_duckduckgo_executables())
+            + list(duckduckgo_from_where())
+        )
+        for path in candidates:
             resolved = resolve_browser_executable(path)
             if resolved and is_duckduckgo_executable(resolved):
                 return resolved, "duckduckgo"
+            if is_duckduckgo_executable(path):
+                return path, "duckduckgo"
         return None, "duckduckgo"
 
     if explicit_path:
