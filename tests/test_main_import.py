@@ -5,90 +5,73 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
-
-
-def test_import_does_not_prompt_for_setup():
-    env = os.environ.copy()
-    env["LENINJA_SKIP_SETUP"] = "1"
-    code = '''
-import builtins
+STUBS = '''
 import sys
 import types
 
-sys.modules["truedriver"] = types.ModuleType("truedriver")
+sys.modules.setdefault("truedriver", types.ModuleType("truedriver"))
+if "httpx" not in sys.modules:
+    httpx_mod = types.ModuleType("httpx")
+    class RequestError(Exception):
+        pass
+    httpx_mod.RequestError = RequestError
+    httpx_mod.AsyncClient = object
+    httpx_mod.Client = object
+    sys.modules["httpx"] = httpx_mod
+'''
 
-orig_input = builtins.input
+
+def _run_main_snippet(code):
+    env = os.environ.copy()
+    env["LENINJA_SKIP_SETUP"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-c", STUBS + "\n" + code],
+        cwd=str(REPO),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert "OK" in proc.stdout
+
+
+def test_import_does_not_prompt_for_setup():
+    _run_main_snippet('''
+import builtins
 
 def boom(*args, **kwargs):
     raise AssertionError("input should not be called during import")
 
 builtins.input = boom
-
 import main
 print("OK")
-'''
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=str(REPO),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, proc.stderr or proc.stdout
-    assert "OK" in proc.stdout
+''')
 
 
 def test_hotmail007_uses_named_mail_type():
-    env = os.environ.copy()
-    env["LENINJA_SKIP_SETUP"] = "1"
-    code = '''
-import sys
-import types
-
-sys.modules["truedriver"] = types.ModuleType("truedriver")
-
+    _run_main_snippet('''
 import main
-
 assert main.Hotmail007Provider("key", mail_type="8").mail_type == "hotmail"
 assert main.Hotmail007Provider("key", mail_type="hotmail").mail_type == "hotmail"
 print("OK")
-'''
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=str(REPO),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, proc.stderr or proc.stdout
-    assert "OK" in proc.stdout
+''')
 
 
 def test_hotmail007_accepts_three_field_mailbox_response():
-    env = os.environ.copy()
-    env["LENINJA_SKIP_SETUP"] = "1"
-    code = '''
+    _run_main_snippet('''
 import asyncio
-import sys
-import types
-
-sys.modules["truedriver"] = types.ModuleType("truedriver")
-
 import main
 
 class Response:
     status_code = 200
-
     def json(self):
         return {"success": True, "data": ["mail@example.com:password"]}
 
 class Client:
     async def __aenter__(self):
         return self
-
     async def __aexit__(self, *args):
         return None
-
     async def get(self, *args, **kwargs):
         return Response()
 
@@ -102,13 +85,140 @@ async def run():
 
 asyncio.run(run())
 print("OK")
-'''
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=str(REPO),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, proc.stderr or proc.stdout
-    assert "OK" in proc.stdout
+''')
+
+
+def test_zeusx_rejects_invalid_payload_and_parses_records():
+    _run_main_snippet('''
+import asyncio
+import main
+
+class Response:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+    def json(self):
+        return self._payload
+
+class Client:
+    payload = {"success": False, "message": "no stock"}
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, *args):
+        return None
+    async def get(self, *args, **kwargs):
+        return Response(200, Client.payload)
+
+main.httpx.AsyncClient = Client
+
+async def run():
+    provider = main.ZeusXProvider("key")
+    assert await provider.create_inbox() is None
+    Client.payload = {"data": [{"email": "zeus@example.com", "password": "secret"}]}
+    assert await provider.create_inbox() == "zeus@example.com"
+    assert provider.password == "secret"
+
+asyncio.run(run())
+print("OK")
+''')
+
+
+def test_duckmail_requires_token_and_uses_worker_thread():
+    _run_main_snippet('''
+import asyncio
+import threading
+import types
+import main
+
+class Response:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+    def json(self):
+        return self._payload
+
+calls = []
+main_thread = threading.get_ident()
+
+def fake_get(url, **kwargs):
+    calls.append(("get", url, threading.get_ident() != main_thread))
+    return Response(200, {"hydra:member": [{"domain": "duckmail.sbs", "isVerified": True}]})
+
+def fake_post(url, **kwargs):
+    calls.append(("post", url, threading.get_ident() != main_thread))
+    if url.endswith("/accounts"):
+        return Response(201, {"id": "acct"})
+    return Response(200, {"token": None})
+
+main.requests = types.SimpleNamespace(get=fake_get, post=fake_post)
+
+async def run():
+    provider = main.DuckMailProvider("key")
+    assert await provider.create_inbox() is None
+    assert any(item[0] == "post" and item[2] for item in calls)
+
+asyncio.run(run())
+print("OK")
+''')
+
+
+def test_save_data_reports_write_errors():
+    _run_main_snippet('''
+import builtins
+import main
+
+creator = main.AccountCreator.__new__(main.AccountCreator)
+creator.email = "user@example.com"
+creator.password = "secret"
+original_open = builtins.open
+
+def fake_open(path, *args, **kwargs):
+    if str(path).endswith("tokens.txt") or str(path).endswith("accounts.txt"):
+        raise OSError("disk full")
+    return original_open(path, *args, **kwargs)
+
+builtins.open = fake_open
+try:
+    try:
+        creator.save_data("token-value")
+        ok = False
+    except OSError:
+        ok = True
+finally:
+    builtins.open = original_open
+assert ok
+print("OK")
+''')
+
+
+def test_vpn_failure_stops_startup():
+    _run_main_snippet('''
+import asyncio
+import main
+
+async def fail_connect():
+    return False
+
+main.mullvad_ensure_connected = fail_connect
+
+async def run():
+    assert await main.require_vpn_connection() is False
+
+asyncio.run(run())
+print("OK")
+''')
+
+
+def test_fingerprint_line_is_consumed():
+    _run_main_snippet('''
+from pathlib import Path
+import main
+
+fp = Path(main.get_path("input")) / "fp-test.txt"
+fp.write_text("one\\ntwo\\n", encoding="utf-8")
+main.FP_FILE = fp
+assert main.consume_fingerprint_line("one") is True
+assert fp.read_text(encoding="utf-8") == "two\\n"
+fp.unlink()
+print("OK")
+''')

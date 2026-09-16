@@ -103,10 +103,6 @@ LeNinja is the project branding. The bundled third-party CAPTCHA extension is pr
 
 ### Remaining issues found during review
 
-- Direct imports are missing from the dependency declarations, and imports run before the installation prompt.
-- Output-write errors can be suppressed.
-- Mailbox providers contain response-validation defects and blocking requests inside asynchronous functions.
-- VPN connection failures do not stop the workflow.
 - The bundled extension is heavily obfuscated and has broad browser permissions.
 
-These runtime issues remain unresolved in this branding and security cleanup.
+Runtime setup, mailbox validation, output writes, and VPN failure handling were updated in a later pass.

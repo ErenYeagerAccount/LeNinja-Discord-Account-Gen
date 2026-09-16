@@ -148,26 +148,95 @@ def prompt_user(query):
     return input(formatted)
 
 
+REQUIRED_IMPORTS = (
+    "httpx",
+    "tls_client",
+    "colorama",
+    "pystyle",
+    "yaml",
+    "PIL",
+    "curl_cffi",
+    "groq",
+    "truedriver",
+)
+
+
+def missing_required_modules():
+    missing = []
+    for module in REQUIRED_IMPORTS:
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(module)
+    return missing
+
+
+def refresh_optional_imports():
+    """Re-bind third-party modules after a successful pip install."""
+    global httpx, tls_client, yaml, Fore, Style, init, Colors, Colorate, Center, Image, requests
+    global Groq, GROQ_AVAILABLE, uc
+    try:
+        httpx = importlib.import_module("httpx")
+    except ImportError:
+        httpx = None
+    try:
+        tls_client = importlib.import_module("tls_client")
+    except ImportError:
+        tls_client = None
+    try:
+        yaml = importlib.import_module("yaml")
+    except ImportError:
+        yaml = None
+    try:
+        colorama = importlib.import_module("colorama")
+        Fore = colorama.Fore
+        Style = colorama.Style
+        init = colorama.init
+        init(autoreset=True)
+    except ImportError:
+        pass
+    try:
+        pystyle = importlib.import_module("pystyle")
+        Colors = pystyle.Colors
+        Colorate = pystyle.Colorate
+        Center = pystyle.Center
+    except ImportError:
+        pass
+    try:
+        Image = importlib.import_module("PIL.Image")
+    except ImportError:
+        Image = None
+    try:
+        requests = importlib.import_module("curl_cffi.requests")
+    except ImportError:
+        requests = None
+    try:
+        Groq = importlib.import_module("groq").Groq
+        GROQ_AVAILABLE = True
+    except ImportError:
+        GROQ_AVAILABLE = False
+    try:
+        uc = importlib.import_module("truedriver")
+    except ImportError:
+        uc = None
+
+
+def get_truedriver():
+    global uc
+    if uc is None:
+        uc = importlib.import_module("truedriver")
+    return uc
+
+
 def install_requirements(force=False):
-    if not os.path.exists("requirements.txt"):
+    requirements_path = Path(__file__).resolve().parent / "requirements.txt"
+    if not requirements_path.exists():
         return True
     if os.environ.get("LENINJA_SKIP_SETUP") == "1" and not force:
         return True
-    try:
-        required = [
-            "httpx", "tls_client", "colorama", "pystyle", "yaml", "PIL",
-            "curl_cffi", "groq", "truedriver"
-        ]
-        missing = []
-        for module in required:
-            try:
-                __import__(module)
-            except ImportError:
-                missing.append(module)
-        if not missing and not force:
-            return True
-    except Exception:
-        pass
+    missing = missing_required_modules()
+    if not missing and not force:
+        return True
 
     choice = prompt_user("Do you want to install requirements? (y/n): ").strip().lower()
     if choice != 'y':
@@ -175,7 +244,12 @@ def install_requirements(force=False):
         return False
     log_message("INFO", "installing requirements, please wait...")
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(requirements_path)])
+        refresh_optional_imports()
+        still_missing = missing_required_modules()
+        if still_missing:
+            log_message("ERROR", f"still missing after install: {', '.join(still_missing)}")
+            return False
         log_message("SUCCESS", "requirements installed successfully!")
         return True
     except subprocess.CalledProcessError:
@@ -183,27 +257,15 @@ def install_requirements(force=False):
         return False
 
 
-# Avoid prompting during import or test execution. Only run the install flow when
-# the script is being launched directly in an interactive terminal.
-try:
+def configure_stdio():
     if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
         try:
             sys.stdout.reconfigure(encoding='utf-8')
         except AttributeError:
             sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
-    import asyncio
-    if os.environ.get("LENINJA_SKIP_SETUP") != "1":
-        install_requirements()
-    import truedriver as uc
-except Exception as e:
-    with open("startup_error.txt", "w", encoding="utf-8") as f:
-        f.write(f"IMPORT ERROR: {str(e)}\n\n")
-        f.write(traceback.format_exc())
-    log_message("ERROR", "fatal error during startup")
-    log_message("ERROR", f"{str(e)}")
-    log_message("INFO", "detailed log saved to 'startup_error.txt'")
-    prompt_user("press enter to exit")
-    sys.exit(1)
+
+
+uc = None
 
 
 @dataclass
@@ -277,6 +339,7 @@ try:
     GROQ_AVAILABLE = True
 except ImportError:
     GROQ_AVAILABLE = False
+    Groq = None
 
 
 LENINJA_EXT_ID = "dknlfmjaanfblgfdfebhijalfmhmjjjo"
@@ -469,16 +532,6 @@ JS_UTILS = '''
     };
 })();
 '''
-
-
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-
-loop.set_exception_handler(lambda loop, context: None)
 
 
 async def animated_cooldown(total_seconds):
@@ -939,6 +992,218 @@ async def rotate_mullvad_ip():
     return new_ip is not None and new_ip != current_ip
 
 
+async def require_vpn_connection():
+    connected = await mullvad_ensure_connected()
+    if not connected:
+        log_message("ERROR", "vpn is enabled but mullvad failed to connect; stopping")
+        return False
+    return True
+
+
+def response_json(response):
+    try:
+        return response.json()
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def parse_mailbox_account(account):
+    """Parse a provider mailbox payload into email, password, refresh token, and client id."""
+    email_addr = password = refresh_token = uuid = None
+    if isinstance(account, dict):
+        email_addr = account.get("email") or account.get("address") or account.get("username")
+        password = account.get("password") or account.get("pass")
+        refresh_token = (
+            account.get("refresh_token")
+            or account.get("refreshToken")
+            or account.get("refresh-token")
+        )
+        uuid = (
+            account.get("client_id")
+            or account.get("clientId")
+            or account.get("client-id")
+            or account.get("uuid")
+        )
+    elif isinstance(account, str):
+        parts = [part.strip() for part in re.split(r"----|\||;|,|\t|\r?\n", account, maxsplit=3)]
+        if len(parts) < 2:
+            parts = [part.strip() for part in account.split(":", 3)]
+        if len(parts) >= 2 and "@" in parts[0] and all(parts[:2]):
+            email_addr, password = parts[:2]
+            refresh_token = parts[2] if len(parts) >= 3 and parts[2] else None
+            uuid = parts[3] if len(parts) >= 4 and parts[3] else None
+    if email_addr and password:
+        return str(email_addr).strip(), str(password), refresh_token, uuid
+    return None
+
+
+def mailbox_records(payload):
+    if payload is None:
+        return []
+    if isinstance(payload, dict):
+        records = payload.get("data", payload)
+        if isinstance(records, dict):
+            nested = records.get("accounts") or records.get("list") or records.get("mail")
+            records = nested if nested is not None else [records]
+        if isinstance(records, str):
+            records = [records]
+        return records if isinstance(records, list) else []
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, str):
+        return [payload]
+    return []
+
+
+async def run_blocking(func, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def fetch_mail_domains(api_base, api_key, provider_name):
+    if requests is None:
+        log_message("ERROR", f"{provider_name} requires curl_cffi")
+        return None
+    try:
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        response = requests.get(f"{api_base}/domains", headers=headers, timeout=15, impersonate="chrome124")
+        if response.status_code != 200:
+            log_message("ERROR", f"{provider_name} domain request failed: HTTP {response.status_code}")
+            return None
+        data = response_json(response)
+        if not isinstance(data, dict):
+            log_message("ERROR", f"{provider_name} returned an invalid domain payload")
+            return None
+        members = data.get("hydra:member", [])
+        if not isinstance(members, list):
+            log_message("ERROR", f"{provider_name} domain list is not an array")
+            return None
+        valid_domains = []
+        for item in members:
+            if not isinstance(item, dict):
+                continue
+            domain = item.get("domain")
+            if domain and item.get("isVerified") and not is_domain_blacklisted(domain):
+                valid_domains.append(domain)
+        return valid_domains or None
+    except Exception as e:
+        log_message("ERROR", f"{provider_name} domain lookup failed: {type(e).__name__}")
+        return None
+
+
+async def create_mail_inbox(provider):
+    name = getattr(provider, "provider_name", "Mailbox")
+    try:
+        domains = await run_blocking(provider.get_domains)
+        if not domains:
+            return None
+        domain = random.choice(domains)
+        user = "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(10, 16)))
+        provider.email = f"{user}@{domain}"
+        provider.password = create_random_string(12)
+
+        headers = {"Content-Type": "application/json"}
+        if provider.api_key:
+            headers["Authorization"] = f"Bearer {provider.api_key}"
+        payload = {
+            "address": provider.email,
+            "password": provider.password,
+            "expiresIn": 0 if provider.never_expire else 86400,
+        }
+        create_resp = await run_blocking(
+            requests.post, f"{provider.api_base}/accounts", headers=headers, json=payload, timeout=15, impersonate="chrome124"
+        )
+        if create_resp.status_code not in [200, 201]:
+            log_message("ERROR", f"{name} inbox create failed: HTTP {create_resp.status_code}")
+            return None
+
+        token_payload = {"address": provider.email, "password": provider.password}
+        token_resp = await run_blocking(
+            requests.post, f"{provider.api_base}/token", headers={"Content-Type": "application/json"}, json=token_payload, timeout=15, impersonate="chrome124"
+        )
+        if token_resp.status_code != 200:
+            log_message("ERROR", f"{name} token request failed: HTTP {token_resp.status_code}")
+            return None
+        token_data = response_json(token_resp)
+        if not isinstance(token_data, dict) or not token_data.get("token"):
+            log_message("ERROR", f"{name} token response was invalid")
+            return None
+        provider.auth_token = token_data.get("token")
+        provider.account_id = token_data.get("id")
+        return provider.email
+    except Exception as e:
+        log_message("ERROR", f"{name} mailbox error: {type(e).__name__}")
+    return None
+
+
+async def get_mail_verification_url(provider):
+    if not provider.auth_token:
+        return None
+    name = getattr(provider, "provider_name", "Mailbox")
+    headers = {"Authorization": f"Bearer {provider.auth_token}"}
+    try:
+        for _ in range(3):
+            response = await run_blocking(
+                requests.get, f"{provider.api_base}/messages", headers=headers, timeout=15, impersonate="chrome124"
+            )
+            if response.status_code != 200:
+                await asyncio.sleep(1)
+                continue
+            data = response_json(response)
+            messages = data.get("hydra:member", []) if isinstance(data, dict) else []
+            if not isinstance(messages, list):
+                await asyncio.sleep(1)
+                continue
+            for mail in messages:
+                if not isinstance(mail, dict):
+                    continue
+                subject = str(mail.get("subject", "") or "").lower()
+                from_data = mail.get("from", {}) or {}
+                from_address = str(from_data.get("address", "") or "").lower()
+                from_name = str(from_data.get("name", "") or "").lower()
+                is_discord = "discord" in from_address or "discord" in from_name
+                has_verify = "verify" in subject or "confirm" in subject or "verification" in subject
+                if not (is_discord or has_verify):
+                    continue
+                msg_id = mail.get("id")
+                if not msg_id:
+                    continue
+                detail_resp = await run_blocking(
+                    requests.get, f"{provider.api_base}/messages/{msg_id}", headers=headers, timeout=15, impersonate="chrome124"
+                )
+                if detail_resp.status_code != 200:
+                    continue
+                msg_detail = response_json(detail_resp) or {}
+                content_parts = []
+                text_body = str(msg_detail.get("text", "") or "")
+                if text_body:
+                    content_parts.append(text_body)
+                for html_body in msg_detail.get("html", []) or []:
+                    content_parts.append(str(html_body or ""))
+                full_content = "\n".join(content_parts)
+                patterns = [
+                    r'https?://(?:www\.)?discord\.com/verify\?token=[a-zA-Z0-9\-\._~%]+',
+                    r'https?://click\.discord\.com/ls/click\?upn=[a-zA-Z0-9\-\._~%]+',
+                ]
+                found_links = []
+                for pattern in patterns:
+                    for url in re.findall(pattern, full_content, re.IGNORECASE):
+                        url = url.replace("\\/", "/").split("\n")[0].strip().replace("&amp;", "&")
+                        url = re.sub(r"[.,;>]$", "", url)
+                        if len(url) > 50:
+                            found_links.append(url)
+                if found_links:
+                    verify_links = [link for link in found_links if "discord.com/verify" in link]
+                    links = verify_links or found_links
+                    links.sort(key=len, reverse=True)
+                    return links[0]
+            await asyncio.sleep(1)
+    except Exception as e:
+        log_message("WARNING", f"{name} mailbox check failed: {type(e).__name__}")
+    return None
+
+
 class MailboxClient:
     def __init__(self, api_token):
         self.email = None
@@ -952,17 +1217,28 @@ class MailboxClient:
             headers = {"X-API-KEY": self.token}
             params = {"type": "discord", "limit": 20}
             async with httpx.AsyncClient() as session:
-                response = await session.get(f"{self.api_base}/getDomains", headers=headers, params=params)
-                if response.status_code == 200:
-                    data = response.json()
-                    if data:
-                        excluded = ["altmails.icu"]
-                        filtered = [d for d in data if not d.endswith('.store') and not d.endswith('.ng') and d not in excluded]
-                        if filtered:
-                            return random.choice(filtered)
-                        return random.choice([d for d in data if d not in excluded]) if any(d not in excluded for d in data) else "cybertemp.xyz"
-        except:
-            pass
+                response = await session.get(f"{self.api_base}/getDomains", headers=headers, params=params, timeout=15)
+                if response.status_code != 200:
+                    log_message("ERROR", f"Cybertemp domain request failed: HTTP {response.status_code}")
+                    return "cybertemp.xyz"
+                data = response_json(response)
+                if not isinstance(data, list):
+                    log_message("ERROR", "Cybertemp returned an invalid domain list")
+                    return "cybertemp.xyz"
+                domains = [d for d in data if isinstance(d, str)]
+                if not domains:
+                    log_message("ERROR", "Cybertemp returned no usable domains")
+                    return "cybertemp.xyz"
+                excluded = ["altmails.icu"]
+                filtered = [d for d in domains if not d.endswith('.store') and not d.endswith('.ng') and d not in excluded]
+                if filtered:
+                    return random.choice(filtered)
+                usable = [d for d in domains if d not in excluded]
+                return random.choice(usable) if usable else "cybertemp.xyz"
+        except httpx.RequestError as e:
+            log_message("ERROR", f"Cybertemp domain lookup failed: {type(e).__name__}")
+        except Exception as e:
+            log_message("ERROR", f"Cybertemp domain error: {type(e).__name__}")
         return "cybertemp.xyz"
 
     async def create_inbox(self):
@@ -1050,9 +1326,8 @@ class Hotmail007Provider:
                     log_message("ERROR", f"Hotmail007 request failed: HTTP {r.status_code}")
                     return None
 
-                try:
-                    data = r.json()
-                except ValueError:
+                data = response_json(r)
+                if data is None:
                     log_message("ERROR", "Hotmail007 returned invalid JSON")
                     return None
 
@@ -1061,42 +1336,16 @@ class Hotmail007Provider:
                     log_message("ERROR", f"Hotmail007 rejected request: {message}")
                     return None
 
-                accounts = data.get("data", []) if isinstance(data, dict) else data
-                if isinstance(accounts, dict):
-                    nested_accounts = accounts.get("accounts") or accounts.get("list")
-                    accounts = nested_accounts if nested_accounts is not None else [accounts]
-                if isinstance(accounts, str):
-                    accounts = [accounts]
-                if not isinstance(accounts, list) or not accounts:
+                accounts = mailbox_records(data)
+                if not accounts:
                     log_message("ERROR", "Hotmail007 returned no mailbox")
                     return None
 
                 account = accounts[0]
-                if isinstance(account, dict):
-                    self.email = account.get("email") or account.get("address") or account.get("username")
-                    self.password = account.get("password") or account.get("pass")
-                    self.refresh_token = (
-                        account.get("refresh_token")
-                        or account.get("refreshToken")
-                        or account.get("refresh-token")
-                    )
-                    self.uuid = (
-                        account.get("client_id")
-                        or account.get("clientId")
-                        or account.get("client-id")
-                        or account.get("uuid")
-                    )
-                    if self.email and self.password and self.refresh_token:
-                        return self.email.strip()
-                elif isinstance(account, str):
-                    parts = [part.strip() for part in re.split(r"----|\||;|,|\t|\r?\n", account, maxsplit=3)]
-                    if len(parts) < 3:
-                        parts = [part.strip() for part in account.split(":", 3)]
-                    if len(parts) >= 2 and "@" in parts[0] and all(parts[:2]):
-                        self.email, self.password = parts[:2]
-                        self.refresh_token = parts[2] if len(parts) >= 3 and parts[2] else None
-                        self.uuid = parts[3] if len(parts) >= 4 else None
-                        return self.email
+                parsed = parse_mailbox_account(account)
+                if parsed:
+                    self.email, self.password, self.refresh_token, self.uuid = parsed
+                    return self.email
 
                 shape = type(account).__name__
                 if isinstance(account, dict):
@@ -1253,27 +1502,31 @@ class ZeusXProvider:
         try:
             async with httpx.AsyncClient() as client:
                 r = await client.get(url, timeout=30)
-                if r.status_code == 200:
-                    data = r.json()
-                    accounts = data.get("data", [])
-                    if not accounts and isinstance(data, list):
-                        accounts = data
-                    
-                    if accounts:
-                        parts = accounts[0].split(":")
-                        if len(parts) >= 4:
-                            self.email = parts[0].strip()
-                            self.password = parts[1].strip()
-                            self.refresh_token = parts[2].strip()
-                            self.uuid = parts[3].strip()
-                            return self.email
-                        elif len(parts) >= 3:
-                            self.email = parts[0].strip()
-                            self.password = parts[1].strip()
-                            self.refresh_token = parts[2].strip()
-                            return self.email
-        except Exception:
-            pass
+                if r.status_code != 200:
+                    log_message("ERROR", f"Zeus-X request failed: HTTP {r.status_code}")
+                    return None
+                data = response_json(r)
+                if data is None:
+                    log_message("ERROR", "Zeus-X returned invalid JSON")
+                    return None
+                if isinstance(data, dict) and data.get("success") is False:
+                    message = data.get("message") or data.get("msg") or "request rejected"
+                    log_message("ERROR", f"Zeus-X rejected request: {message}")
+                    return None
+                accounts = mailbox_records(data)
+                if not accounts:
+                    log_message("ERROR", "Zeus-X returned no mailbox")
+                    return None
+                parsed = parse_mailbox_account(accounts[0])
+                if not parsed:
+                    log_message("ERROR", "Zeus-X returned unsupported mailbox format")
+                    return None
+                self.email, self.password, self.refresh_token, self.uuid = parsed
+                return self.email
+        except httpx.RequestError as e:
+            log_message("ERROR", f"Zeus-X connection failed: {type(e).__name__}")
+        except Exception as e:
+            log_message("ERROR", f"Zeus-X mailbox error: {type(e).__name__}")
         return None
 
     async def get_verification_url(self):
@@ -1328,115 +1581,16 @@ class DuckMailProvider:
         self.auth_token = None
         self.account_id = None
         self.never_expire = never_expire
+        self.provider_name = "DuckMail"
 
     def get_domains(self):
-        try:
-            headers = {}
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            response = requests.get(f"{self.api_base}/domains", headers=headers, timeout=15, impersonate="chrome124")
-            if response.status_code == 200:
-                data = response.json()
-                members = data.get("hydra:member", [])
-                valid_domains = []
-                for item in members:
-                    domain = item.get("domain")
-                    if domain and item.get("isVerified") and not is_domain_blacklisted(domain):
-                        valid_domains.append(domain)
-                if valid_domains:
-                    return valid_domains
-        except:
-            pass
-        return None
+        return fetch_mail_domains(self.api_base, self.api_key, self.provider_name)
 
     async def create_inbox(self, session=None):
-        try:
-            domains = self.get_domains()
-            if not domains:
-                return None
-            domain = random.choice(domains)
-            user = "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(10, 16)))
-            self.email = f"{user}@{domain}"
-            self.password = create_random_string(12)
-
-            headers = {"Content-Type": "application/json"}
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            payload = {
-                "address": self.email,
-                "password": self.password,
-                "expiresIn": 0 if self.never_expire else 86400,
-            }
-            create_resp = requests.post(f"{self.api_base}/accounts", headers=headers, json=payload, timeout=15, impersonate="chrome124")
-            if create_resp.status_code not in [200, 201]:
-                return None
-
-            token_payload = {"address": self.email, "password": self.password}
-            token_resp = requests.post(f"{self.api_base}/token", headers={"Content-Type": "application/json"}, json=token_payload, timeout=15, impersonate="chrome124")
-            if token_resp.status_code == 200:
-                token_data = token_resp.json()
-                self.auth_token = token_data.get("token")
-                self.account_id = token_data.get("id")
-            return self.email
-        except:
-            pass
-        return None
+        return await create_mail_inbox(self)
 
     async def get_verification_url(self):
-        if not self.auth_token:
-            return None
-        headers = {"Authorization": f"Bearer {self.auth_token}"}
-        try:
-            for _ in range(3):
-                response = requests.get(f"{self.api_base}/messages", headers=headers, timeout=15, impersonate="chrome124")
-                if response.status_code == 200:
-                    data = response.json()
-                    messages = data.get("hydra:member", [])
-                    if isinstance(messages, list):
-                        for mail in messages:
-                            subject = str(mail.get("subject", "") or "").lower()
-                            from_data = mail.get("from", {}) or {}
-                            from_address = str(from_data.get("address", "") or "").lower()
-                            from_name = str(from_data.get("name", "") or "").lower()
-                            is_discord = "discord" in from_address or "discord" in from_name
-                            has_verify = "verify" in subject or "confirm" in subject or "verification" in subject
-                            if is_discord or has_verify:
-                                msg_id = mail.get("id")
-                                if msg_id:
-                                    detail_resp = requests.get(f"{self.api_base}/messages/{msg_id}", headers=headers, timeout=15, impersonate="chrome124")
-                                    if detail_resp.status_code == 200:
-                                        msg_detail = detail_resp.json()
-                                        content_parts = []
-                                        text_body = str(msg_detail.get("text", "") or "")
-                                        if text_body:
-                                            content_parts.append(text_body)
-                                        html_bodies = msg_detail.get("html", []) or []
-                                        for html_body in html_bodies:
-                                            content_parts.append(str(html_body or ""))
-                                        full_content = "\n".join(content_parts)
-                                        patterns = [
-                                            r'https?://(?:www\.)?discord\.com/verify\?token=[a-zA-Z0-9\-\._~%]+',
-                                            r'https?://click\.discord\.com/ls/click\?upn=[a-zA-Z0-9\-\._~%]+',
-                                        ]
-                                        found_links = []
-                                        for pattern in patterns:
-                                            matches = re.findall(pattern, full_content, re.IGNORECASE)
-                                            for url in matches:
-                                                url = url.replace("\\/", "/").split("\n")[0].strip().replace("&amp;", "&")
-                                                url = re.sub(r"[.,;>]$", "", url)
-                                                if len(url) > 50:
-                                                    found_links.append(url)
-                                        if found_links:
-                                            verify_links = [link for link in found_links if "discord.com/verify" in link]
-                                            if verify_links:
-                                                verify_links.sort(key=len, reverse=True)
-                                                return verify_links[0]
-                                            found_links.sort(key=len, reverse=True)
-                                            return found_links[0]
-                await asyncio.sleep(1)
-        except:
-            pass
-        return None
+        return await get_mail_verification_url(self)
 
 
 class CrowMailProvider:
@@ -1448,115 +1602,16 @@ class CrowMailProvider:
         self.auth_token = None
         self.account_id = None
         self.never_expire = never_expire
+        self.provider_name = "CrowMail"
 
     def get_domains(self):
-        try:
-            headers = {}
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            response = requests.get(f"{self.api_base}/domains", headers=headers, timeout=15, impersonate="chrome124")
-            if response.status_code == 200:
-                data = response.json()
-                members = data.get("hydra:member", [])
-                valid_domains = []
-                for item in members:
-                    domain = item.get("domain")
-                    if domain and item.get("isVerified") and not is_domain_blacklisted(domain):
-                        valid_domains.append(domain)
-                if valid_domains:
-                    return valid_domains
-        except:
-            pass
-        return None
+        return fetch_mail_domains(self.api_base, self.api_key, self.provider_name)
 
     async def create_inbox(self, session=None):
-        try:
-            domains = self.get_domains()
-            if not domains:
-                return None
-            domain = random.choice(domains)
-            user = "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(10, 16)))
-            self.email = f"{user}@{domain}"
-            self.password = create_random_string(12)
-
-            headers = {"Content-Type": "application/json"}
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            payload = {
-                "address": self.email,
-                "password": self.password,
-                "expiresIn": 0 if self.never_expire else 86400,
-            }
-            create_resp = requests.post(f"{self.api_base}/accounts", headers=headers, json=payload, timeout=15, impersonate="chrome124")
-            if create_resp.status_code not in [200, 201]:
-                return None
-
-            token_payload = {"address": self.email, "password": self.password}
-            token_resp = requests.post(f"{self.api_base}/token", headers={"Content-Type": "application/json"}, json=token_payload, timeout=15, impersonate="chrome124")
-            if token_resp.status_code == 200:
-                token_data = token_resp.json()
-                self.auth_token = token_data.get("token")
-                self.account_id = token_data.get("id")
-            return self.email
-        except:
-            pass
-        return None
+        return await create_mail_inbox(self)
 
     async def get_verification_url(self):
-        if not self.auth_token:
-            return None
-        headers = {"Authorization": f"Bearer {self.auth_token}"}
-        try:
-            for _ in range(3):
-                response = requests.get(f"{self.api_base}/messages", headers=headers, timeout=15, impersonate="chrome124")
-                if response.status_code == 200:
-                    data = response.json()
-                    messages = data.get("hydra:member", [])
-                    if isinstance(messages, list):
-                        for mail in messages:
-                            subject = str(mail.get("subject", "") or "").lower()
-                            from_data = mail.get("from", {}) or {}
-                            from_address = str(from_data.get("address", "") or "").lower()
-                            from_name = str(from_data.get("name", "") or "").lower()
-                            is_discord = "discord" in from_address or "discord" in from_name
-                            has_verify = "verify" in subject or "confirm" in subject or "verification" in subject
-                            if is_discord or has_verify:
-                                msg_id = mail.get("id")
-                                if msg_id:
-                                    detail_resp = requests.get(f"{self.api_base}/messages/{msg_id}", headers=headers, timeout=15, impersonate="chrome124")
-                                    if detail_resp.status_code == 200:
-                                        msg_detail = detail_resp.json()
-                                        content_parts = []
-                                        text_body = str(msg_detail.get("text", "") or "")
-                                        if text_body:
-                                            content_parts.append(text_body)
-                                        html_bodies = msg_detail.get("html", []) or []
-                                        for html_body in html_bodies:
-                                            content_parts.append(str(html_body or ""))
-                                        full_content = "\n".join(content_parts)
-                                        patterns = [
-                                            r'https?://(?:www\.)?discord\.com/verify\?token=[a-zA-Z0-9\-\._~%]+',
-                                            r'https?://click\.discord\.com/ls/click\?upn=[a-zA-Z0-9\-\._~%]+',
-                                        ]
-                                        found_links = []
-                                        for pattern in patterns:
-                                            matches = re.findall(pattern, full_content, re.IGNORECASE)
-                                            for url in matches:
-                                                url = url.replace("\\/", "/").split("\n")[0].strip().replace("&amp;", "&")
-                                                url = re.sub(r"[.,;>]$", "", url)
-                                                if len(url) > 50:
-                                                    found_links.append(url)
-                                        if found_links:
-                                            verify_links = [link for link in found_links if "discord.com/verify" in link]
-                                            if verify_links:
-                                                verify_links.sort(key=len, reverse=True)
-                                                return verify_links[0]
-                                            found_links.sort(key=len, reverse=True)
-                                            return found_links[0]
-                await asyncio.sleep(1)
-        except:
-            pass
-        return None
+        return await get_mail_verification_url(self)
 
 
 class AfhamMailProvider:
@@ -1620,12 +1675,18 @@ class AfhamMailProvider:
                     timeout=15,
                 )
                 if response.status_code in [200, 201]:
-                    data = response.json()
+                    data = response_json(response)
+                    if not isinstance(data, dict) or not data.get("address"):
+                        log_message("ERROR", "Afham returned an invalid inbox payload")
+                        return None
                     self.email = data.get("address")
                     self.inbox_id = data.get("id")
                     return self.email
-        except:
-            pass
+                log_message("ERROR", f"Afham inbox create failed: HTTP {response.status_code}")
+        except httpx.RequestError as e:
+            log_message("ERROR", f"Afham connection failed: {type(e).__name__}")
+        except Exception as e:
+            log_message("ERROR", f"Afham mailbox error: {type(e).__name__}")
         return None
 
     async def get_verification_url(self):
@@ -1731,7 +1792,7 @@ class BrowserContext:
             args.append(f"--disable-extensions-except={extension_path}")
 
         try:
-            self.driver = await uc.start(
+            self.driver = await get_truedriver().start(
                 browser_executable_path=brave_path,
                 browser_args=args,
                 proxy=proxy
@@ -1776,19 +1837,23 @@ class AccountCreator:
             self.session.proxies = {"http": proxy, "https": proxy}
 
     def save_account_locally(self, status, token=""):
-        output_dir = Path(get_path("output"))
-        output_dir.mkdir(exist_ok=True)
-        if status == "valid" and token:
-            acc_path = output_dir / "accounts.txt"
-            tok_path = output_dir / "tokens.txt"
-            with open(acc_path, "a", encoding="utf-8") as f:
-                f.write(f"{self.email}:{self.password}:{token}\n")
-            with open(tok_path, "a", encoding="utf-8") as f:
-                f.write(f"{token}\n")
-        elif status == "locked" and token:
-            locked_path = output_dir / "locked.txt"
-            with open(locked_path, "a", encoding="utf-8") as f:
-                f.write(f"{self.email}:{self.password}:{token}\n")
+        try:
+            output_dir = Path(get_path("output"))
+            output_dir.mkdir(exist_ok=True)
+            if status == "valid" and token:
+                acc_path = output_dir / "accounts.txt"
+                tok_path = output_dir / "tokens.txt"
+                with open(acc_path, "a", encoding="utf-8") as f:
+                    f.write(f"{self.email}:{self.password}:{token}\n")
+                with open(tok_path, "a", encoding="utf-8") as f:
+                    f.write(f"{token}\n")
+            elif status == "locked" and token:
+                locked_path = output_dir / "locked.txt"
+                with open(locked_path, "a", encoding="utf-8") as f:
+                    f.write(f"{self.email}:{self.password}:{token}\n")
+        except OSError as e:
+            log_message("ERROR", f"failed to write account output: {e}")
+            raise
 
     async def report_status(self, status, token=""):
         self.save_account_locally(status, token)
@@ -2224,8 +2289,14 @@ class AccountCreator:
                 mask = f"{token[:24]}{'*' * 12}"
                 ts = datetime.now().strftime("%H:%M:%S")
                 print(f"{Fore.LIGHTBLACK_EX}{ts}{Style.RESET_ALL}  {Fore.YELLOW}WAR{Style.RESET_ALL}  {Fore.WHITE}Locked: {Style.RESET_ALL}{Fore.LIGHTBLACK_EX}{mask}{Style.RESET_ALL}")
-                with open("output/locked.txt", "a", encoding="utf-8") as f:
-                    f.write(f"{self.email}:{self.password}:{token}\n")
+                try:
+                    output_dir = Path(get_path("output"))
+                    output_dir.mkdir(exist_ok=True)
+                    with open(output_dir / "locked.txt", "a", encoding="utf-8") as f:
+                        f.write(f"{self.email}:{self.password}:{token}\n")
+                except OSError as e:
+                    log_message("ERROR", f"failed to write locked account output: {e}")
+                    raise
                 return "LOCKED"
 
             log_message("SUCCESS", "Verified successfully")
@@ -2241,14 +2312,16 @@ class AccountCreator:
 
     def save_data(self, token):
         try:
-            os.makedirs("output", exist_ok=True)
-            with open("output/tokens.txt", "a", encoding="utf-8") as f:
+            output_dir = Path(get_path("output"))
+            output_dir.mkdir(exist_ok=True)
+            with open(output_dir / "tokens.txt", "a", encoding="utf-8") as f:
                 f.write(token + "\n")
-            with open("output/accounts.txt", "a", encoding="utf-8") as f:
+            with open(output_dir / "accounts.txt", "a", encoding="utf-8") as f:
                 f.write(f"{self.email}:{self.password}:{token}\n")
             self.token = token
-        except:
-            pass
+        except OSError as e:
+            log_message("ERROR", f"failed to write account output: {e}")
+            raise
 
 
 
@@ -2291,6 +2364,7 @@ def consume_fingerprint_line(raw_line: str) -> bool:
         lines = _load_fp_lines()
         if raw_line not in lines:
             return False
+        lines.remove(raw_line)
         FP_FILE.write_text(chr(10).join(lines) + (chr(10) if lines else ""), encoding="utf-8")
         return True
 
@@ -2448,7 +2522,9 @@ async def main():
         return
 
     if use_vpn:
-        await mullvad_ensure_connected()
+        if not await require_vpn_connection():
+            prompt_user("press enter to exit")
+            return
 
     if not check_environment():
         log_message("WARNING", "brave not found")
@@ -2544,7 +2620,10 @@ async def main():
             elif target != 0 and done >= target: break
             else:
                 if use_vpn:
-                    await rotate_mullvad_ip()
+                    rotated = await rotate_mullvad_ip()
+                    if not rotated:
+                        log_message("ERROR", "vpn rotation failed; stopping")
+                        break
                 else:
                     await animated_cooldown(vpn_delay)
                 
@@ -2559,16 +2638,29 @@ async def main():
 
 if __name__ == '__main__':
     def silent_error(loop, context):
-        pass
-        
+        message = context.get("message", "async error")
+        exception = context.get("exception")
+        detail = f"{message}: {exception}" if exception else message
+        log_message("ERROR", detail)
+
     try:
+        configure_stdio()
+        if not install_requirements():
+            log_message("ERROR", "required packages are missing; install them from requirements.txt")
+            prompt_user("press enter to exit")
+            sys.exit(1)
+        refresh_optional_imports()
+        if missing_required_modules():
+            log_message("ERROR", f"missing packages: {', '.join(missing_required_modules())}")
+            prompt_user("press enter to exit")
+            sys.exit(1)
         if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.set_exception_handler(silent_error)
-        
+
         try:
             loop.run_until_complete(main())
         except (asyncio.CancelledError, KeyboardInterrupt):
@@ -2576,9 +2668,12 @@ if __name__ == '__main__':
         finally:
             loop.close()
     except Exception as e:
-        with open("crash.log", "w") as f:
-            f.write(f"CRASH: {str(e)}\n\n")
-            f.write(traceback.format_exc())
+        try:
+            with open("crash.log", "w", encoding="utf-8") as f:
+                f.write(f"CRASH: {str(e)}\n\n")
+                f.write(traceback.format_exc())
+        except OSError as write_error:
+            log_message("ERROR", f"failed to write crash.log: {write_error}")
         print(f"CRASH: {str(e)}")
         prompt_user("press enter to exit")
     finally:
