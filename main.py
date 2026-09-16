@@ -2229,7 +2229,7 @@ class BrowserContext:
             )
             tab = await self.driver.get(url)
             try:
-                await tab.wait_for_ready_state('complete', timeout=45000)
+                await tab.wait_for_ready_state('complete', timeout=12000)
             except Exception:
                 pass
             ready = await self.wait_for_registration_form(tab)
@@ -2237,7 +2237,7 @@ class BrowserContext:
                 log_message("WARNING", "discord register page did not render; reloading once")
                 try:
                     await tab.reload()
-                    await tab.wait_for_ready_state('complete', timeout=45000)
+                    await tab.wait_for_ready_state('complete', timeout=12000)
                 except Exception:
                     pass
                 ready = await self.wait_for_registration_form(tab)
@@ -2253,7 +2253,7 @@ class BrowserContext:
             log_message("ERROR", f"browser start failed: {str(e)}")
             return None
 
-    async def wait_for_registration_form(self, tab, timeout=40):
+    async def wait_for_registration_form(self, tab, timeout=12):
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -2262,7 +2262,7 @@ class BrowserContext:
                     return True
             except Exception:
                 pass
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.15)
         return False
 
     async def stop(self):
@@ -2373,36 +2373,36 @@ class AccountCreator:
             return None, 0
 
     async def human_type(self, element, text: str):
-        for char in text:
-            await element.send_keys(char)
-            await asyncio.sleep(random.uniform(0.005, 0.02))
+        await element.send_keys(text)
 
-    async def clear_and_type(self, page, selector: str, value: str, timeout: int = 45):
-        try:
-            element = None
-            for _ in range(5):
-                try:
-                    element = await page.select(selector, timeout=timeout//5)
-                    if element: break
-                except:
-                    await asyncio.sleep(2)
-            if not element:
-                raise Exception(f"Element not found: {selector}")
-            selector_js = json.dumps(selector)
-            await page.evaluate(
-                f'''() => {{
-                    const el = document.querySelector({selector_js});
-                    if (!el) return;
-                    el.focus();
-                    el.value = "";
-                    el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-                    el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-                }}'''
-            )
-            await asyncio.sleep(random.uniform(0.01, 0.04))
-            await self.human_type(element, value)
-        except Exception as e:
-            raise e
+    async def fill_input(self, page, selector: str, value: str, timeout: int = 8):
+        selector_js = json.dumps(selector)
+        value_js = json.dumps(value)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                filled = await page.evaluate(
+                    f'''() => {{
+                        const el = document.querySelector({selector_js});
+                        if (!el) return false;
+                        el.focus();
+                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+                        if (setter) setter.call(el, {value_js});
+                        else el.value = {value_js};
+                        el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                        el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+                        return true;
+                    }}'''
+                )
+                if filled:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.15)
+        raise Exception(f"Element not found: {selector}")
+
+    async def clear_and_type(self, page, selector: str, value: str, timeout: int = 8):
+        await self.fill_input(page, selector, value, timeout=timeout)
 
     async def detect_registration_issue(self, page) -> Optional[dict]: 
         try: 
@@ -2431,38 +2431,23 @@ class AccountCreator:
     async def fill_registration_form(self, page, email: str, display_name: str, username: str, password: str) -> bool:
         try:
             try:
-                await self.clear_and_type(page, 'input[name="email"]', email, timeout=45)
-                await asyncio.sleep(random.uniform(0.05, 0.15))
+                await self.fill_input(page, 'input[name="email"]', email, timeout=8)
             except Exception as e:
                 log_message("ERROR", "form failed: registration fields never appeared")
                 return False
             try:
-                await self.clear_and_type(page, 'input[name="global_name"]', display_name, timeout=20)
-                await asyncio.sleep(random.uniform(0.05, 0.15))
+                await self.fill_input(page, 'input[name="global_name"]', display_name, timeout=5)
+                await self.fill_input(page, 'input[name="username"]', username, timeout=5)
+                await self.fill_input(page, 'input[name="password"]', password, timeout=5)
             except Exception as e:
                 return False
-            try:
-                await self.clear_and_type(page, 'input[name="username"]', username, timeout=20)
-                await asyncio.sleep(random.uniform(0.05, 0.15))
-            except Exception as e:
-                return False
-            try:
-                await self.clear_and_type(page, 'input[name="password"]', password, timeout=20)
-                await asyncio.sleep(random.uniform(0.05, 0.15))
-            except Exception as e:
-                return False
-            await asyncio.sleep(0.1)
             await self.fill_date_of_birth(page)
-            await asyncio.sleep(0.05)
             try:
                 await page.evaluate(JS_UTILS)
-                await asyncio.sleep(0.05)
                 await page.evaluate('window.utils.clickAllCheckboxes()')
-                await asyncio.sleep(0.05)
             except Exception as e:
                 pass
             clicked = False
-            await asyncio.sleep(0.1)
             try:
                 buttons = await page.select_all('button')
                 for button in buttons:
@@ -2503,52 +2488,52 @@ class AccountCreator:
             return False
 
     async def fill_date_of_birth(self, page):
+        try:
+            filled = await page.evaluate('''() => {
+                const setListbox = (labelPart, optionText) => {
+                    const trigger = document.querySelector(`[aria-label*="${labelPart}"]`);
+                    if (!trigger) return false;
+                    trigger.click();
+                    const options = [...document.querySelectorAll('[role="option"], [role="listbox"] *')];
+                    const match = options.find(el => (el.textContent || "").trim().startsWith(optionText));
+                    if (match) { match.click(); return true; }
+                    trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+                    return true;
+                };
+                const year = String(1990 + Math.floor(Math.random() * 10));
+                const month = ["January","February","March","April","May","June","July","August","September","October","November","December"][Math.floor(Math.random()*12)];
+                const day = String(1 + Math.floor(Math.random()*27));
+                setListbox("Month", month.slice(0, 3));
+                setListbox("Day", day);
+                setListbox("Year", year);
+                return true;
+            }''')
+            if filled:
+                return
+        except Exception:
+            pass
         import truedriver.cdp.input_ as cdp_input
         try:
-            month_el = await page.select('[aria-label*="Month"], [aria-label*="Mês"]', timeout=5)
-            await month_el.click()
-            await asyncio.sleep(0.05)
-            month_scrolls = random.randint(1, 11)
-            for _ in range(month_scrolls):
-                await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await asyncio.sleep(0.005)
-            await asyncio.sleep(0.05)
-            await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-            await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-            await asyncio.sleep(0.05)
-            day_el = await page.select('[aria-label*="Day"], [aria-label*="Dia"]', timeout=5)
-            await day_el.click()
-            await asyncio.sleep(0.05)
-            day_scrolls = random.randint(1, 28)
-            for _ in range(day_scrolls):
-                await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await asyncio.sleep(0.005)
-            await asyncio.sleep(0.05)
-            await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-            await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-            await asyncio.sleep(0.05)
-            year_el = await page.select('[aria-label*="Year"], [aria-label*="Ano"]', timeout=5)
-            await year_el.click()
-            await asyncio.sleep(0.05)
-            year_scrolls = random.randint(25, 35)
-            for _ in range(year_scrolls):
-                await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await asyncio.sleep(0.005)
-            await asyncio.sleep(0.05)
-            await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-            await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-        except Exception as e:
+            async def pick(selector, downs):
+                el = await page.select(selector, timeout=3)
+                await el.click()
+                for _ in range(downs):
+                    await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
+                    await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
+                await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
+                await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
+            await pick('[aria-label*="Month"], [aria-label*="Mês"]', random.randint(1, 4))
+            await pick('[aria-label*="Day"], [aria-label*="Dia"]', random.randint(1, 5))
+            await pick('[aria-label*="Year"], [aria-label*="Ano"]', random.randint(8, 14))
+        except Exception:
             pass
 
     async def handle_challenges(self, page):
         try:
             is_active = False
             clear_started = None
-            stable_wait = 4.0
-            for i in range(180):
+            stable_wait = 1.5
+            for i in range(90):
                 queries = ['iframe[src*="captcha"]', 'div[class*="captcha"]', '.h-captcha', '.g-recaptcha', '[data-sitekey]']
                 detected = False
                 for q in queries:
@@ -2561,7 +2546,6 @@ class AccountCreator:
                         continue
 
                 if detected and not is_active:
-                    log_message("INFO", "mail pulled")
                     log_message("WARNING", "captcha appeared")
                     is_active = True
                     clear_started = None
@@ -2572,15 +2556,14 @@ class AccountCreator:
                             clear_started = time.monotonic()
                         elapsed = time.monotonic() - clear_started
                         if elapsed >= stable_wait:
-                            log_message("INFO", "captcha cleared after manual solve")
                             log_message("SUCCESS", "captcha solved")
                             return True
-                    elif i >= 10:
+                    elif i >= 2:
                         return True
                 else:
                     clear_started = None
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.25)
         except Exception:
             pass
         return True
@@ -2637,7 +2620,7 @@ class AccountCreator:
 
             except Exception as e:
                 log_message("WARNING", f"Token check error: {str(e)}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
         log_message("ERROR", f"Token wait timeout ({timeout}s)")
         return None, None
 
@@ -2655,7 +2638,7 @@ class AccountCreator:
                     library = self.session.get(
                         "https://discordapp.com/api/v9/users/@me/library",
                         headers=headers,
-                        timeout=15,
+                        timeout=5,
                     )
                     if library.status_code == 403:
                         return "locked"
@@ -2695,18 +2678,18 @@ class AccountCreator:
     async def verify_email(self):
         url = None
         log_message("INFO", "Waiting for verification email...")
-        for attempt in range(300):
+        for attempt in range(180):
             try:
                 url = await self.mailbox.get_verification_url()
                 if url:
                     break
             except Exception as e:
-                if attempt % 30 == 0 and attempt > 0:
+                if attempt % 20 == 0 and attempt > 0:
                     log_message("WARNING", f"Still waiting for email ({attempt}s)")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.35)
 
         if not url:
-            log_message("ERROR", "Mail timeout (300s)")
+            log_message("ERROR", "Mail timeout")
             return None
 
         try:
@@ -2722,7 +2705,7 @@ class AccountCreator:
 
             log_message("INFO", "Extracting authentication token...")
             challenge_task = asyncio.create_task(self.handle_challenges(tab))
-            token, status = await self.wait_for_auth(tab, timeout=180)
+            token, status = await self.wait_for_auth(tab, timeout=90)
 
             try:
                 challenge_task.cancel()
@@ -2974,7 +2957,7 @@ def setup_files():
                 "afham_mail_api9_key": "",
                 "vpn": False,
                 "vpn_delay": 120,
-                "browser": "vivaldi",
+                "browser": "auto",
                 "browser_path": "",
             }, f)
     
@@ -3002,7 +2985,7 @@ async def main():
 
         cfg = load_yaml_config(config_path)
         use_vpn = cfg.get('vpn', False)
-        vpn_delay = int(cfg.get('vpn_delay', 120))
+        vpn_delay = int(cfg.get('vpn_delay', 8))
         configure_browser(cfg)
     except Exception as e:
         log_message("ERROR", f"config error: {e}")

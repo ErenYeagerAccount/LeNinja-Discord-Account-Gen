@@ -1,5 +1,5 @@
 vpn: false
-vpn_delay: 15
+vpn_delay: 5
 # auto = Brave, then Chrome (Vivaldi often shows a blank Discord page)
 browser: auto
 # Optional .exe path. Do not use a Start Menu .lnk
