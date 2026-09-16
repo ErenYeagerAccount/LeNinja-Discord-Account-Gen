@@ -293,3 +293,20 @@ assert name
 fake.unlink()
 print("OK")
 ''')
+
+
+def test_config_accepts_double_quoted_windows_path():
+    _run_main_snippet('''
+from pathlib import Path
+import main
+
+path = Path(main.get_path("config")) / "windows-path.yaml"
+# Same shape as the local error: "C:\\Users\\..." inside double quotes
+path.write_text('browser: vivaldi\\nbrowser_path: "C:\\\\Users\\\\TUSHAR\\\\Desktop\\\\vivaldi.exe"\\nvpn: false\\n', encoding="utf-8")
+cfg = main.load_yaml_config(path)
+assert cfg["browser"] == "vivaldi"
+assert "Users" in cfg["browser_path"]
+assert cfg["browser_path"].endswith("vivaldi.exe")
+path.unlink()
+print("OK")
+''')

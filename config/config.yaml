@@ -3,6 +3,8 @@ vpn_delay: 15
 # Chromium-based, not Chrome/Edge/Brave/Opera/Firefox. Recommended: vivaldi
 # Other options: thorium, chromium, arc
 browser: vivaldi
+# Use single quotes for Windows paths. Double quotes break on \Users
+# Example: browser_path: 'C:\Users\TUSHAR\AppData\Local\Vivaldi\Application\vivaldi.exe'
 browser_path: ""
 cybertemp_key: ""
 draxon_key: ""

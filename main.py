@@ -2772,7 +2772,25 @@ def get_fingerprint_label(fp: dict) -> str:
     return fp.get('name') or fp.get('fingerprint', '')[:20] or fp.get('user_agent', '')[:40] or 'custom'
 
 
-def setup_files():
+def soften_windows_yaml_paths(text):
+    """YAML double quotes treat \\Users as an escape. Convert those paths to single quotes."""
+
+    def replacer(match):
+        inner = match.group(1).replace("\\\\", "\\")
+        return "'" + inner.replace("'", "''") + "'"
+
+    return re.sub(r'"([A-Za-z]:\\[^"\n]*)"', replacer, text)
+
+
+def load_yaml_config(config_path):
+    raw = Path(config_path).read_text(encoding="utf-8")
+    try:
+        loaded = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        loaded = yaml.safe_load(soften_windows_yaml_paths(raw))
+    if not isinstance(loaded, dict):
+        raise ValueError("config.yaml must contain a mapping of settings")
+    return loaded
     folders = ["config", "extension", "output", "data", "data/avatars", "input"]
     for folder in folders:
         Path(get_path(folder)).mkdir(exist_ok=True, parents=True)
@@ -2813,11 +2831,10 @@ async def main():
             prompt_user("press enter to exit")
             return
 
-        with open(config_path, "r") as f:
-            cfg = yaml.safe_load(f)
-            use_vpn = cfg.get('vpn', False)
-            vpn_delay = int(cfg.get('vpn_delay', 120))
-            configure_browser(cfg)
+        cfg = load_yaml_config(config_path)
+        use_vpn = cfg.get('vpn', False)
+        vpn_delay = int(cfg.get('vpn_delay', 120))
+        configure_browser(cfg)
     except Exception as e:
         log_message("ERROR", f"config error: {e}")
         prompt_user("press enter to exit")
