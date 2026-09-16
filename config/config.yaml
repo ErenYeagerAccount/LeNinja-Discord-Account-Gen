@@ -1,9 +1,9 @@
 vpn: false
 vpn_delay: 5
-# auto = Ungoogled Chromium, then Vivaldi. Never Chrome/Brave/Edge/Thorium.
-browser: auto
+# auto = DuckDuckGo Browser only (other Chromium browsers blank Discord register)
+browser: duckduckgo
 # Real .exe only. Start Menu .lnk files will not launch.
-# Example: 'C:\Users\YOU\AppData\Local\Chromium\Application\chrome.exe'
+# Example: 'C:\Users\YOU\AppData\Local\DuckDuckGo\DuckDuckGo.exe'
 browser_path: ""
 cybertemp_key: ""
 draxon_key: ""

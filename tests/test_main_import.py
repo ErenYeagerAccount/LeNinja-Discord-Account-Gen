@@ -284,12 +284,12 @@ def test_browser_rejects_start_menu_shortcut():
 from pathlib import Path
 import main
 
-lnk = Path(main.get_path("input")) / "Vivaldi.lnk"
+lnk = Path(main.get_path("input")) / "DuckDuckGo.lnk"
 lnk.write_bytes(b"Not an executable shortcut")
-exe = Path(main.get_path("input")) / "vivaldi.exe"
+exe = Path(main.get_path("input")) / "DuckDuckGo.exe"
 exe.write_bytes(b"MZ")
-main.BROWSER_EXECUTABLES = {"vivaldi": [str(exe)]}
-main.configure_browser({"browser": "vivaldi", "browser_path": str(lnk)})
+main.BROWSER_EXECUTABLES = {"duckduckgo": [str(exe)]}
+main.configure_browser({"browser": "duckduckgo", "browser_path": str(lnk)})
 path, name = main.find_browser_path()
 assert path == str(exe)
 assert not path.lower().endswith(".lnk")
@@ -304,12 +304,12 @@ def test_browser_uses_explicit_config_path():
 from pathlib import Path
 import main
 
-fake = Path(main.get_path("input")) / "fake-vivaldi.exe"
+fake = Path(main.get_path("input")) / "DuckDuckGo.exe"
 fake.write_text("stub", encoding="utf-8")
-main.configure_browser({"browser": "vivaldi", "browser_path": str(fake)})
+main.configure_browser({"browser": "duckduckgo", "browser_path": str(fake)})
 path, name = main.find_browser_path()
 assert path == str(fake)
-assert name
+assert name == "duckduckgo"
 fake.unlink()
 print("OK")
 ''')
@@ -339,7 +339,7 @@ print("OK")
 ''')
 
 
-def test_auto_prefers_ungoogled_chromium_over_brave_chrome_thorium():
+def test_auto_prefers_duckduckgo_over_other_browsers():
     _run_main_snippet('''
 from pathlib import Path
 import main
@@ -347,29 +347,31 @@ import main
 inp = Path(main.get_path("input"))
 brave = inp / "brave.exe"
 chrome = inp / "chrome.exe"
-thorium = inp / "thorium.exe"
 chromium = inp / "chromium-chrome.exe"
-for p in (brave, chrome, thorium, chromium):
+ddg = inp / "DuckDuckGo.exe"
+for p in (brave, chrome, chromium, ddg):
     p.write_bytes(b"MZ")
 main.BROWSER_EXECUTABLES = {
     "brave": [str(brave)],
     "chrome": [str(chrome)],
-    "thorium": [str(thorium)],
     "chromium": [str(chromium)],
+    "thorium": [],
     "arc": [],
     "vivaldi": [],
+    "duckduckgo": [str(ddg)],
 }
 main.configure_browser({"browser": "auto", "browser_path": ""})
 path, name = main.find_browser_path()
-assert path == str(chromium)
-assert name == "chromium"
+assert path == str(ddg)
+assert name == "duckduckgo"
 main.configure_browser({"browser": "auto", "browser_path": str(brave)})
 path, name = main.find_browser_path()
-assert path == str(chromium)
-main.configure_browser({"browser": "ungoogled-chromium", "browser_path": ""})
+assert path == str(ddg)
+main.configure_browser({"browser": "ddg", "browser_path": ""})
 path, name = main.find_browser_path()
-assert path == str(chromium)
-for p in (brave, chrome, thorium, chromium):
+assert path == str(ddg)
+assert not main.is_blocked_discord_browser(str(ddg), "duckduckgo")
+for p in (brave, chrome, chromium, ddg):
     p.unlink()
 print("OK")
 ''')

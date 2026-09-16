@@ -480,9 +480,22 @@ async def setup_leninja(log_func=None):
 
 BROWSER_SETTINGS = {"name": "auto", "path": None}
 
-# Discord register blanks on Brave/Chrome/Edge with CDP.
-# Auto mode uses Ungoogled Chromium (signed Chromium builds), then Vivaldi.
+# Discord register blanks on Chrome/Brave/Edge/Vivaldi/Chromium with CDP.
+# Auto mode launches DuckDuckGo Browser only.
 BROWSER_EXECUTABLES = {
+    "duckduckgo": [
+        os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\DuckDuckGo.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\Application\DuckDuckGo.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\Application\chrome.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\DuckDuckGo\DuckDuckGo.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\DuckDuckGo\Application\DuckDuckGo.exe"),
+        r"C:\Program Files\DuckDuckGo\DuckDuckGo.exe",
+        r"C:\Program Files\DuckDuckGo\Application\DuckDuckGo.exe",
+        r"C:\Program Files (x86)\DuckDuckGo\DuckDuckGo.exe",
+        r"C:\Program Files (x86)\DuckDuckGo\Application\DuckDuckGo.exe",
+        "/Applications/DuckDuckGo.app/Contents/MacOS/DuckDuckGo",
+        "/usr/bin/duckduckgo-browser",
+    ],
     "chromium": [
         r"C:\Program Files\Chromium\Application\chrome.exe",
         r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
@@ -532,8 +545,18 @@ BROWSER_EXECUTABLES = {
         "/usr/bin/google-chrome-stable",
     ],
 }
-BROWSER_SEARCH_ORDER = ("chromium", "vivaldi", "arc")
-BLOCKED_AUTO_BROWSERS = ("brave", "chrome", "msedge", "edge", "google-chrome")
+BROWSER_SEARCH_ORDER = ("duckduckgo",)
+BLOCKED_AUTO_BROWSERS = (
+    "brave",
+    "chrome",
+    "msedge",
+    "edge",
+    "google-chrome",
+    "vivaldi",
+    "chromium",
+    "thorium",
+    "arc",
+)
 
 
 def first_existing_path(paths):
@@ -609,7 +632,7 @@ def resolve_browser_executable(path):
     if path.lower().endswith(".lnk"):
         return resolve_shortcut_target(path)
     if os.path.isdir(path):
-        for name in ("chrome.exe", "chromium.exe", "vivaldi.exe", "thorium.exe", "Arc.exe", "brave.exe"):
+        for name in ("DuckDuckGo.exe", "duckduckgo.exe", "chrome.exe", "chromium.exe", "vivaldi.exe", "thorium.exe", "Arc.exe", "brave.exe"):
             for nested in (os.path.join(path, name), os.path.join(path, "Application", name)):
                 if is_browser_executable(nested):
                     return nested
@@ -619,11 +642,13 @@ def resolve_browser_executable(path):
     return None
 
 
-def browser_label(path, fallback="chromium"):
+def browser_label(path, fallback="duckduckgo"):
     if not path:
         return fallback
     lower = path.lower()
     name = os.path.splitext(os.path.basename(path))[0].lower()
+    if "duckduckgo" in lower or name in ("duckduckgo", "ddg"):
+        return "duckduckgo"
     if "thorium" in lower:
         return "thorium"
     if "vivaldi" in lower:
@@ -642,10 +667,12 @@ def browser_label(path, fallback="chromium"):
 
 
 def is_blocked_discord_browser(path, name=""):
+    blob = f"{path or ''} {name or ''}".lower().replace("/", "\\")
+    if "duckduckgo" in blob:
+        return False
     label = (name or browser_label(path) or "").strip().lower()
     if label in BLOCKED_AUTO_BROWSERS:
         return True
-    blob = f"{path or ''} {name or ''}".lower().replace("/", "\\")
     if "bravesoftware" in blob or "\\brave.exe" in blob or blob.endswith("brave.exe"):
         return True
     if "google\\chrome" in blob or "google-chrome" in blob:
@@ -668,6 +695,8 @@ def find_browser_path(preferred=None, explicit_path=None):
     preferred = (preferred or BROWSER_SETTINGS.get("name") or "auto").strip().lower()
     if preferred in ("ungoogled", "ungoogled-chromium", "ungoogled_chromium"):
         preferred = "chromium"
+    if preferred in ("ddg", "duck", "duck-duck-go", "duckduckgo-browser"):
+        preferred = "duckduckgo"
     explicit_path = explicit_path if explicit_path is not None else BROWSER_SETTINGS.get("path")
 
     def first_preferred():
@@ -686,7 +715,7 @@ def find_browser_path(preferred=None, explicit_path=None):
         return None, preferred
 
     if preferred in BLOCKED_AUTO_BROWSERS:
-        log_message("WARNING", "Chrome, Brave, and Edge blank Discord register; using Ungoogled Chromium instead")
+        log_message("WARNING", "Chrome/Brave/Edge/Vivaldi/Chromium blank Discord register; using DuckDuckGo Browser instead")
 
     if explicit_path:
         resolved = resolve_browser_executable(explicit_path)
@@ -699,14 +728,14 @@ def find_browser_path(preferred=None, explicit_path=None):
             if blocked:
                 log_message(
                     "WARNING",
-                    "Chrome/Brave/Edge cannot be used for Discord register; switching to Ungoogled Chromium",
+                    "that browser blanks Discord register; switching to DuckDuckGo Browser",
                 )
             return better, better_name
         if resolved and not blocked:
             return resolved, label or preferred
         log_message(
             "WARNING",
-            "browser_path is not a usable Chromium .exe (Start Menu .lnk files are ignored)",
+            "browser_path is not a usable DuckDuckGo .exe (Start Menu .lnk files are ignored)",
         )
 
     found, name = first_preferred()
@@ -2236,7 +2265,7 @@ class BrowserContext:
         if not browser_path:
             log_message(
                 "ERROR",
-                "no supported browser found. install Ungoogled Chromium, then set browser_path to chrome.exe under Chromium (not Google Chrome, Brave, Edge, Thorium, or a .lnk)",
+                "no supported browser found. install DuckDuckGo Browser, then set browser_path to DuckDuckGo.exe (not Chrome, Brave, Edge, or a .lnk)",
             )
             return None
         if is_blocked_discord_browser(browser_path, browser_name):
@@ -3052,7 +3081,7 @@ async def main():
             return
 
     if not check_environment():
-        log_message("WARNING", "Ungoogled Chromium not found. install it and set browser_path to Chromium\\Application\\chrome.exe")
+        log_message("WARNING", "DuckDuckGo Browser not found. install it and set browser_path to DuckDuckGo.exe")
 
     proxies = load_proxies(cfg)
 
