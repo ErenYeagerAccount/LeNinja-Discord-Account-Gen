@@ -478,16 +478,81 @@ async def setup_leninja(log_func=None):
     return ext_path
 
 
-def get_brave_path() -> Optional[str]:
-    paths = [
-        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-        r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
-    ]
-    for p in paths:
-        if os.path.exists(p):
-            return p
+BROWSER_SETTINGS = {"name": "vivaldi", "path": None}
+
+# Chromium-family browsers that are not Chrome, Edge, Brave, Opera, Firefox, or DuckDuckGo.
+BROWSER_EXECUTABLES = {
+    "vivaldi": [
+        r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
+        r"C:\Program Files (x86)\Vivaldi\Application\vivaldi.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe"),
+        "/usr/bin/vivaldi",
+        "/usr/bin/vivaldi-stable",
+        "/opt/vivaldi/vivaldi",
+    ],
+    "thorium": [
+        r"C:\Program Files\Thorium\thorium.exe",
+        r"C:\Program Files\Thorium\Application\thorium.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Thorium\Application\thorium.exe"),
+        "/usr/bin/thorium-browser",
+        "/opt/thorium/thorium",
+    ],
+    "chromium": [
+        r"C:\Program Files\Chromium\Application\chrome.exe",
+        r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Chromium\Application\chrome.exe"),
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/ungoogled-chromium",
+    ],
+    "arc": [
+        os.path.expandvars(r"%LOCALAPPDATA%\Arc\Application\Arc.exe"),
+        "/Applications/Arc.app/Contents/MacOS/Arc",
+    ],
+}
+BROWSER_SEARCH_ORDER = ("vivaldi", "thorium", "chromium", "arc")
+
+
+def first_existing_path(paths):
+    for path in paths:
+        if path and os.path.exists(path):
+            return path
     return None
+
+
+def configure_browser(config=None):
+    config = config or {}
+    name = str(config.get("browser") or "vivaldi").strip().lower() or "vivaldi"
+    explicit = str(config.get("browser_path") or "").strip().strip('"') or None
+    BROWSER_SETTINGS["name"] = name
+    BROWSER_SETTINGS["path"] = explicit
+    return BROWSER_SETTINGS
+
+
+def find_browser_path(preferred=None, explicit_path=None):
+    explicit_path = explicit_path if explicit_path is not None else BROWSER_SETTINGS.get("path")
+    if explicit_path:
+        expanded = os.path.expandvars(os.path.expanduser(explicit_path))
+        if os.path.exists(expanded):
+            return expanded, os.path.splitext(os.path.basename(expanded))[0].lower()
+        return None, preferred or BROWSER_SETTINGS.get("name") or "vivaldi"
+
+    preferred = (preferred or BROWSER_SETTINGS.get("name") or "vivaldi").strip().lower()
+    if preferred in BROWSER_EXECUTABLES:
+        found = first_existing_path(BROWSER_EXECUTABLES[preferred])
+        if found:
+            return found, preferred
+
+    for name in BROWSER_SEARCH_ORDER:
+        found = first_existing_path(BROWSER_EXECUTABLES[name])
+        if found:
+            return found, name
+    return None, preferred
+
+
+def get_brave_path() -> Optional[str]:
+    path, _name = find_browser_path()
+    return path
 
 
 class GroqCaptchaSolver:
@@ -1993,9 +2058,8 @@ class AfhamMailProvider:
 
 
 def check_environment():
-    if get_brave_path():
-        return True
-    return False
+    path, _name = find_browser_path()
+    return bool(path)
 
 
 class BrowserContext:
@@ -2003,9 +2067,12 @@ class BrowserContext:
         self.driver = None
 
     async def start(self, url, extension_path=None, proxy=None, fingerprint=None):
-        brave_path = get_brave_path()
-        if not brave_path:
-            log_message("ERROR", "brave browser not found")
+        browser_path, browser_name = find_browser_path()
+        if not browser_path:
+            log_message(
+                "ERROR",
+                "no supported browser found. install Vivaldi (recommended) or set browser_path in config/config.yaml",
+            )
             return None
 
         args = ["--lang=en-US"]
@@ -2016,8 +2083,9 @@ class BrowserContext:
             args.append(f"--disable-extensions-except={extension_path}")
 
         try:
+            log_message("INFO", f"using {browser_name}: {browser_path}")
             self.driver = await get_truedriver().start(
-                browser_executable_path=brave_path,
+                browser_executable_path=browser_path,
                 browser_args=args,
                 proxy=proxy
             )
@@ -2712,7 +2780,16 @@ def setup_files():
     config_path = Path(get_path("config/config.yaml"))
     if not config_path.exists():
         with open(config_path, "w") as f:
-            yaml.dump({"cybertemp_key": "", "hotmail007_key": "", "zeusx_key": "", "afham_mail_api9_key": "", "vpn": False, "vpn_delay": 120}, f)
+            yaml.dump({
+                "cybertemp_key": "",
+                "hotmail007_key": "",
+                "zeusx_key": "",
+                "afham_mail_api9_key": "",
+                "vpn": False,
+                "vpn_delay": 120,
+                "browser": "vivaldi",
+                "browser_path": "",
+            }, f)
     
     nopecha_path = Path(get_path("config/nopecha.txt"))
     if not nopecha_path.exists():
@@ -2740,6 +2817,7 @@ async def main():
             cfg = yaml.safe_load(f)
             use_vpn = cfg.get('vpn', False)
             vpn_delay = int(cfg.get('vpn_delay', 120))
+            configure_browser(cfg)
     except Exception as e:
         log_message("ERROR", f"config error: {e}")
         prompt_user("press enter to exit")
@@ -2751,7 +2829,7 @@ async def main():
             return
 
     if not check_environment():
-        log_message("WARNING", "brave not found")
+        log_message("WARNING", "vivaldi/thorium/chromium not found. install Vivaldi or set browser_path")
 
     proxies = load_proxies(cfg)
 

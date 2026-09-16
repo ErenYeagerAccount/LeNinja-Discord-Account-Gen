@@ -1,5 +1,9 @@
 vpn: false
 vpn_delay: 15
+# Chromium-based, not Chrome/Edge/Brave/Opera/Firefox. Recommended: vivaldi
+# Other options: thorium, chromium, arc
+browser: vivaldi
+browser_path: ""
 cybertemp_key: ""
 draxon_key: ""
 hotmail007_key: ""

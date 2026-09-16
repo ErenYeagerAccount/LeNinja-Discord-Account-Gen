@@ -277,3 +277,19 @@ assert fp.read_text(encoding="utf-8") == "two\\n"
 fp.unlink()
 print("OK")
 ''')
+
+
+def test_browser_uses_explicit_config_path():
+    _run_main_snippet('''
+from pathlib import Path
+import main
+
+fake = Path(main.get_path("input")) / "fake-vivaldi.exe"
+fake.write_text("stub", encoding="utf-8")
+main.configure_browser({"browser": "vivaldi", "browser_path": str(fake)})
+path, name = main.find_browser_path()
+assert path == str(fake)
+assert name
+fake.unlink()
+print("OK")
+''')
