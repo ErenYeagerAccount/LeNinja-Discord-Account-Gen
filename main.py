@@ -515,29 +515,121 @@ BROWSER_SEARCH_ORDER = ("vivaldi", "thorium", "chromium", "arc")
 
 def first_existing_path(paths):
     for path in paths:
-        if path and os.path.exists(path):
-            return path
+        resolved = resolve_browser_executable(path)
+        if resolved:
+            return resolved
     return None
+
+
+def is_browser_executable(path):
+    if not path or not os.path.isfile(path):
+        return False
+    lower = path.lower()
+    if lower.endswith((".lnk", ".url", ".bat", ".cmd", ".msi")):
+        return False
+    if lower.endswith(".exe"):
+        return True
+    if os.name == "nt":
+        return False
+    return os.access(path, os.X_OK)
+
+
+def resolve_shortcut_target(path):
+    if not path or not str(path).lower().endswith(".lnk") or not os.path.isfile(path):
+        return None
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        data = b""
+    candidates = []
+    if data:
+        for match in re.finditer(rb"[A-Za-z]:\\(?:[^\\\x00]+\\)*[^\\\x00]+\.exe", data, re.I):
+            candidates.append(match.group().decode("ascii", "ignore"))
+        utf16 = data.decode("utf-16le", errors="ignore")
+        for match in re.finditer(r"[A-Za-z]:\\(?:[^\\:*?\"<>|\x00]+\\)*[^\\:*?\"<>|\x00]+\.exe", utf16, re.I):
+            candidates.append(match.group())
+    if os.name == "nt":
+        try:
+            quoted = json.dumps(os.path.abspath(path))
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"(New-Object -ComObject WScript.Shell).CreateShortcut({quoted}).TargetPath",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=0x08000000,
+            )
+            target = (completed.stdout or "").strip().strip('"')
+            if target:
+                candidates.insert(0, target)
+        except Exception:
+            pass
+    for candidate in candidates:
+        if is_browser_executable(candidate):
+            return candidate
+        nested = resolve_browser_executable(candidate)
+        if nested:
+            return nested
+    return None
+
+
+def resolve_browser_executable(path):
+    if not path:
+        return None
+    path = os.path.expandvars(os.path.expanduser(str(path).strip().strip('"').strip("'")))
+    if not path:
+        return None
+    if path.lower().endswith(".lnk"):
+        return resolve_shortcut_target(path)
+    if os.path.isdir(path):
+        for name in ("vivaldi.exe", "thorium.exe", "chrome.exe", "Arc.exe"):
+            for nested in (os.path.join(path, name), os.path.join(path, "Application", name)):
+                if is_browser_executable(nested):
+                    return nested
+        return None
+    if is_browser_executable(path):
+        return path
+    return None
+
+
+def browser_label(path, fallback="vivaldi"):
+    if not path:
+        return fallback
+    name = os.path.splitext(os.path.basename(path))[0].lower()
+    if name in ("chrome",):
+        parent = os.path.basename(os.path.dirname(os.path.dirname(path) if os.path.basename(os.path.dirname(path)).lower() == "application" else os.path.dirname(path))).lower()
+        if "chromium" in parent:
+            return "chromium"
+        if "vivaldi" in path.lower():
+            return "vivaldi"
+    return name or fallback
 
 
 def configure_browser(config=None):
     config = config or {}
     name = str(config.get("browser") or "vivaldi").strip().lower() or "vivaldi"
-    explicit = str(config.get("browser_path") or "").strip().strip('"') or None
+    explicit = str(config.get("browser_path") or "").strip().strip('"').strip("'") or None
     BROWSER_SETTINGS["name"] = name
     BROWSER_SETTINGS["path"] = explicit
     return BROWSER_SETTINGS
 
 
 def find_browser_path(preferred=None, explicit_path=None):
+    preferred = (preferred or BROWSER_SETTINGS.get("name") or "vivaldi").strip().lower()
     explicit_path = explicit_path if explicit_path is not None else BROWSER_SETTINGS.get("path")
     if explicit_path:
-        expanded = os.path.expandvars(os.path.expanduser(explicit_path))
-        if os.path.exists(expanded):
-            return expanded, os.path.splitext(os.path.basename(expanded))[0].lower()
-        return None, preferred or BROWSER_SETTINGS.get("name") or "vivaldi"
+        resolved = resolve_browser_executable(explicit_path)
+        if resolved:
+            return resolved, browser_label(resolved, preferred)
+        log_message(
+            "WARNING",
+            "browser_path is not an .exe (Start Menu .lnk shortcuts cannot be launched). Searching for Vivaldi instead",
+        )
 
-    preferred = (preferred or BROWSER_SETTINGS.get("name") or "vivaldi").strip().lower()
     if preferred in BROWSER_EXECUTABLES:
         found = first_existing_path(BROWSER_EXECUTABLES[preferred])
         if found:

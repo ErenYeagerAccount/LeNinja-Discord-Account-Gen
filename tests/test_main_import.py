@@ -279,6 +279,26 @@ print("OK")
 ''')
 
 
+def test_browser_rejects_start_menu_shortcut():
+    _run_main_snippet('''
+from pathlib import Path
+import main
+
+lnk = Path(main.get_path("input")) / "Vivaldi.lnk"
+lnk.write_bytes(b"Not an executable shortcut")
+exe = Path(main.get_path("input")) / "vivaldi.exe"
+exe.write_bytes(b"MZ")
+main.BROWSER_EXECUTABLES = {"vivaldi": [str(exe)]}
+main.configure_browser({"browser": "vivaldi", "browser_path": str(lnk)})
+path, name = main.find_browser_path()
+assert path == str(exe)
+assert not path.lower().endswith(".lnk")
+lnk.unlink()
+exe.unlink()
+print("OK")
+''')
+
+
 def test_browser_uses_explicit_config_path():
     _run_main_snippet('''
 from pathlib import Path

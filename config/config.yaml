@@ -5,6 +5,7 @@ vpn_delay: 15
 browser: vivaldi
 # Use single quotes for Windows paths. Double quotes break on \Users
 # Example: browser_path: 'C:\Users\TUSHAR\AppData\Local\Vivaldi\Application\vivaldi.exe'
+# Do not use a Start Menu .lnk shortcut.
 browser_path: ""
 cybertemp_key: ""
 draxon_key: ""
