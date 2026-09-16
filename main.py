@@ -2791,6 +2791,9 @@ def load_yaml_config(config_path):
     if not isinstance(loaded, dict):
         raise ValueError("config.yaml must contain a mapping of settings")
     return loaded
+
+
+def setup_files():
     folders = ["config", "extension", "output", "data", "data/avatars", "input"]
     for folder in folders:
         Path(get_path(folder)).mkdir(exist_ok=True, parents=True)
