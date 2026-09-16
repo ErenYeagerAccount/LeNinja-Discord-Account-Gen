@@ -1,8 +1,7 @@
 vpn: false
 vpn_delay: 5
-# auto = DuckDuckGo Browser only (other Chromium browsers blank Discord register)
+# Always DuckDuckGo.exe. Chrome/Brave/Edge paths are ignored.
 browser: duckduckgo
-# Real .exe only. Start Menu .lnk files will not launch.
 # Example: 'C:\Users\YOU\AppData\Local\DuckDuckGo\DuckDuckGo.exe'
 browser_path: ""
 cybertemp_key: ""

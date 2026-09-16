@@ -480,13 +480,12 @@ async def setup_leninja(log_func=None):
 
 BROWSER_SETTINGS = {"name": "auto", "path": None}
 
-# Discord register blanks on Chrome/Brave/Edge/Vivaldi/Chromium with CDP.
-# Auto mode launches DuckDuckGo Browser only.
+# Auto mode launches DuckDuckGo.exe only. chrome.exe is never started.
 BROWSER_EXECUTABLES = {
     "duckduckgo": [
         os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\DuckDuckGo.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\Application\DuckDuckGo.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\Application\chrome.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\browser\DuckDuckGo.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\DuckDuckGo\DuckDuckGo.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\DuckDuckGo\Application\DuckDuckGo.exe"),
         r"C:\Program Files\DuckDuckGo\DuckDuckGo.exe",
@@ -495,54 +494,6 @@ BROWSER_EXECUTABLES = {
         r"C:\Program Files (x86)\DuckDuckGo\Application\DuckDuckGo.exe",
         "/Applications/DuckDuckGo.app/Contents/MacOS/DuckDuckGo",
         "/usr/bin/duckduckgo-browser",
-    ],
-    "chromium": [
-        r"C:\Program Files\Chromium\Application\chrome.exe",
-        r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
-        r"C:\Program Files\Ungoogled Chromium\Application\chrome.exe",
-        r"C:\Program Files (x86)\Ungoogled Chromium\Application\chrome.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Chromium\Application\chrome.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Ungoogled Chromium\Application\chrome.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\ungoogled-chromium\Application\chrome.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Chromium\Application\chrome.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ungoogled Chromium\Application\chrome.exe"),
-        os.path.expandvars(r"%USERPROFILE%\scoop\apps\ungoogled-chromium\current\chrome.exe"),
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/ungoogled-chromium",
-    ],
-    "arc": [
-        os.path.expandvars(r"%LOCALAPPDATA%\Arc\Application\Arc.exe"),
-        "/Applications/Arc.app/Contents/MacOS/Arc",
-    ],
-    "vivaldi": [
-        r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
-        r"C:\Program Files (x86)\Vivaldi\Application\vivaldi.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe"),
-        "/usr/bin/vivaldi",
-        "/usr/bin/vivaldi-stable",
-        "/opt/vivaldi/vivaldi",
-    ],
-    "thorium": [
-        r"C:\Program Files\Thorium\thorium.exe",
-        r"C:\Program Files\Thorium\Application\thorium.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Thorium\Application\thorium.exe"),
-        "/usr/bin/thorium-browser",
-        "/opt/thorium/thorium",
-    ],
-    "brave": [
-        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-        r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
-        "/usr/bin/brave-browser",
-        "/usr/bin/brave",
-    ],
-    "chrome": [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
     ],
 }
 BROWSER_SEARCH_ORDER = ("duckduckgo",)
@@ -632,7 +583,7 @@ def resolve_browser_executable(path):
     if path.lower().endswith(".lnk"):
         return resolve_shortcut_target(path)
     if os.path.isdir(path):
-        for name in ("DuckDuckGo.exe", "duckduckgo.exe", "chrome.exe", "chromium.exe", "vivaldi.exe", "thorium.exe", "Arc.exe", "brave.exe"):
+        for name in ("DuckDuckGo.exe", "duckduckgo.exe"):
             for nested in (os.path.join(path, name), os.path.join(path, "Application", name)):
                 if is_browser_executable(nested):
                     return nested
@@ -647,6 +598,8 @@ def browser_label(path, fallback="duckduckgo"):
         return fallback
     lower = path.lower()
     name = os.path.splitext(os.path.basename(path))[0].lower()
+    if name == "chrome" or name == "google-chrome":
+        return "chrome"
     if "duckduckgo" in lower or name in ("duckduckgo", "ddg"):
         return "duckduckgo"
     if "thorium" in lower:
@@ -657,91 +610,102 @@ def browser_label(path, fallback="duckduckgo"):
         return "brave"
     if "msedge" in lower or "microsoft\\edge" in lower or "microsoft/edge" in lower:
         return "edge"
-    if name in ("chrome", "chromium"):
-        parent = os.path.basename(os.path.dirname(os.path.dirname(path) if os.path.basename(os.path.dirname(path)).lower() == "application" else os.path.dirname(path))).lower()
-        if "chromium" in parent or "ungoogled" in lower:
-            return "chromium"
-        if "google" in lower:
-            return "chrome"
+    if name in ("chromium",):
+        return "chromium"
+    if "google" in lower and name == "chrome":
+        return "chrome"
     return name or fallback
 
 
-def is_blocked_discord_browser(path, name=""):
-    blob = f"{path or ''} {name or ''}".lower().replace("/", "\\")
-    if "duckduckgo" in blob:
+def is_duckduckgo_executable(path):
+    if not path:
         return False
-    label = (name or browser_label(path) or "").strip().lower()
-    if label in BLOCKED_AUTO_BROWSERS:
-        return True
-    if "bravesoftware" in blob or "\\brave.exe" in blob or blob.endswith("brave.exe"):
-        return True
-    if "google\\chrome" in blob or "google-chrome" in blob:
-        return True
-    if "msedge" in blob or "microsoft\\edge" in blob:
-        return True
-    return False
+    base = os.path.splitext(os.path.basename(str(path)))[0].lower()
+    if base != "duckduckgo":
+        return False
+    return is_browser_executable(path) or str(path).lower().endswith(".exe")
+
+
+def is_blocked_discord_browser(path, name=""):
+    if is_duckduckgo_executable(path):
+        return False
+    return True
 
 
 def configure_browser(config=None):
     config = config or {}
-    name = str(config.get("browser") or "auto").strip().lower() or "auto"
     explicit = str(config.get("browser_path") or "").strip().strip('"').strip("'") or None
-    BROWSER_SETTINGS["name"] = name
-    BROWSER_SETTINGS["path"] = explicit
+    BROWSER_SETTINGS["name"] = "duckduckgo"
+    if explicit:
+        resolved = resolve_browser_executable(explicit)
+        if resolved and is_duckduckgo_executable(resolved):
+            BROWSER_SETTINGS["path"] = resolved
+        else:
+            if explicit:
+                log_message("WARNING", "ignoring browser_path because it is not DuckDuckGo.exe (Chrome/Brave/Edge are blocked)")
+            BROWSER_SETTINGS["path"] = None
+    else:
+        BROWSER_SETTINGS["path"] = None
     return BROWSER_SETTINGS
 
 
+def discover_duckduckgo_executables():
+    found = []
+    seen = set()
+    roots = [
+        os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\DuckDuckGo"),
+        r"C:\Program Files\DuckDuckGo",
+        r"C:\Program Files (x86)\DuckDuckGo",
+    ]
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                depth = dirpath[len(root):].count(os.sep)
+                if depth > 5:
+                    dirnames.clear()
+                    continue
+                for filename in filenames:
+                    if filename.lower() != "duckduckgo.exe":
+                        continue
+                    full = os.path.join(dirpath, filename)
+                    key = os.path.normcase(os.path.abspath(full))
+                    if key in seen:
+                        continue
+                    if is_duckduckgo_executable(full):
+                        seen.add(key)
+                        found.append(full)
+        except OSError:
+            continue
+    return found
+
+
 def find_browser_path(preferred=None, explicit_path=None):
-    preferred = (preferred or BROWSER_SETTINGS.get("name") or "auto").strip().lower()
-    if preferred in ("ungoogled", "ungoogled-chromium", "ungoogled_chromium"):
-        preferred = "chromium"
-    if preferred in ("ddg", "duck", "duck-duck-go", "duckduckgo-browser"):
-        preferred = "duckduckgo"
     explicit_path = explicit_path if explicit_path is not None else BROWSER_SETTINGS.get("path")
 
-    def first_preferred():
-        requested = () if preferred in ("auto", "any", "") else (preferred,)
-        order = requested + BROWSER_SEARCH_ORDER
-        seen = set()
-        for name in order:
-            if name in seen or name not in BROWSER_EXECUTABLES:
-                continue
-            seen.add(name)
-            if name in BLOCKED_AUTO_BROWSERS:
-                continue
-            found = first_existing_path(BROWSER_EXECUTABLES[name])
-            if found and not is_blocked_discord_browser(found, name):
-                return found, name
-        return None, preferred
-
-    if preferred in BLOCKED_AUTO_BROWSERS:
-        log_message("WARNING", "Chrome/Brave/Edge/Vivaldi/Chromium blank Discord register; using DuckDuckGo Browser instead")
+    def first_duckduckgo():
+        listed = list(BROWSER_EXECUTABLES.get("duckduckgo") or [])
+        for path in listed + discover_duckduckgo_executables():
+            resolved = resolve_browser_executable(path)
+            if resolved and is_duckduckgo_executable(resolved):
+                return resolved, "duckduckgo"
+        return None, "duckduckgo"
 
     if explicit_path:
         resolved = resolve_browser_executable(explicit_path)
-        label = browser_label(resolved, preferred) if resolved else ""
-        blocked = bool(resolved) and is_blocked_discord_browser(resolved, label)
-        if resolved and not blocked:
-            return resolved, label
-        better, better_name = first_preferred()
-        if better and (not resolved or os.path.normcase(better) != os.path.normcase(resolved)):
-            if blocked:
-                log_message(
-                    "WARNING",
-                    "that browser blanks Discord register; switching to DuckDuckGo Browser",
-                )
-            return better, better_name
-        if resolved and not blocked:
-            return resolved, label or preferred
+        if resolved and is_duckduckgo_executable(resolved):
+            return resolved, "duckduckgo"
         log_message(
             "WARNING",
-            "browser_path is not a usable DuckDuckGo .exe (Start Menu .lnk files are ignored)",
+            "browser_path is not DuckDuckGo.exe (Chrome is blocked). Searching for DuckDuckGo Browser",
         )
 
-    found, name = first_preferred()
+    found, name = first_duckduckgo()
     if found:
         return found, name
-    return None, preferred
+    return None, "duckduckgo"
 
 
 def get_brave_path() -> Optional[str]:
@@ -2325,8 +2289,8 @@ class BrowserContext:
                 "no supported browser found. install DuckDuckGo Browser, then set browser_path to DuckDuckGo.exe (not Chrome, Brave, Edge, or a .lnk)",
             )
             return None
-        if is_blocked_discord_browser(browser_path, browser_name):
-            log_message("ERROR", "refusing Chrome/Brave/Edge; Discord register stays blank")
+        if not is_duckduckgo_executable(browser_path):
+            log_message("ERROR", "refusing Chrome/Brave/Edge; only DuckDuckGo.exe is allowed")
             return None
 
         args = [
@@ -2346,12 +2310,15 @@ class BrowserContext:
             args.append(f"--load-extension={extension_path}")
 
         try:
-            log_message("INFO", f"using {browser_name}: {browser_path}")
-            self.driver = await get_truedriver().start(
-                browser_executable_path=browser_path,
-                browser_args=args,
-                proxy=proxy
-            )
+            log_message("INFO", f"using duckduckgo: {browser_path}")
+            start_kwargs = {
+                "browser_executable_path": os.path.abspath(browser_path),
+                "browser_args": args,
+                "headless": False,
+            }
+            if proxy:
+                start_kwargs["proxy"] = proxy
+            self.driver = await get_truedriver().start(**start_kwargs)
             tab = await self.driver.get(url)
             try:
                 await tab.wait_for_ready_state('complete', timeout=12000)
@@ -3097,7 +3064,7 @@ def setup_files():
                 "afham_mail_api9_key": "",
                 "vpn": False,
                 "vpn_delay": 120,
-                "browser": "auto",
+                "browser": "duckduckgo",
                 "browser_path": "",
             }, f)
     
