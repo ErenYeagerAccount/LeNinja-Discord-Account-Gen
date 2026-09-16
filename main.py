@@ -148,26 +148,95 @@ def prompt_user(query):
     return input(formatted)
 
 
+REQUIRED_IMPORTS = (
+    "httpx",
+    "tls_client",
+    "colorama",
+    "pystyle",
+    "yaml",
+    "PIL",
+    "curl_cffi",
+    "groq",
+    "truedriver",
+)
+
+
+def missing_required_modules():
+    missing = []
+    for module in REQUIRED_IMPORTS:
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(module)
+    return missing
+
+
+def refresh_optional_imports():
+    """Re-bind third-party modules after a successful pip install."""
+    global httpx, tls_client, yaml, Fore, Style, init, Colors, Colorate, Center, Image, requests
+    global Groq, GROQ_AVAILABLE, uc
+    try:
+        httpx = importlib.import_module("httpx")
+    except ImportError:
+        httpx = None
+    try:
+        tls_client = importlib.import_module("tls_client")
+    except ImportError:
+        tls_client = None
+    try:
+        yaml = importlib.import_module("yaml")
+    except ImportError:
+        yaml = None
+    try:
+        colorama = importlib.import_module("colorama")
+        Fore = colorama.Fore
+        Style = colorama.Style
+        init = colorama.init
+        init(autoreset=True)
+    except ImportError:
+        pass
+    try:
+        pystyle = importlib.import_module("pystyle")
+        Colors = pystyle.Colors
+        Colorate = pystyle.Colorate
+        Center = pystyle.Center
+    except ImportError:
+        pass
+    try:
+        Image = importlib.import_module("PIL.Image")
+    except ImportError:
+        Image = None
+    try:
+        requests = importlib.import_module("curl_cffi.requests")
+    except ImportError:
+        requests = None
+    try:
+        Groq = importlib.import_module("groq").Groq
+        GROQ_AVAILABLE = True
+    except ImportError:
+        GROQ_AVAILABLE = False
+    try:
+        uc = importlib.import_module("truedriver")
+    except ImportError:
+        uc = None
+
+
+def get_truedriver():
+    global uc
+    if uc is None:
+        uc = importlib.import_module("truedriver")
+    return uc
+
+
 def install_requirements(force=False):
-    if not os.path.exists("requirements.txt"):
+    requirements_path = Path(__file__).resolve().parent / "requirements.txt"
+    if not requirements_path.exists():
         return True
     if os.environ.get("LENINJA_SKIP_SETUP") == "1" and not force:
         return True
-    try:
-        required = [
-            "httpx", "tls_client", "colorama", "pystyle", "yaml", "PIL",
-            "curl_cffi", "groq", "truedriver"
-        ]
-        missing = []
-        for module in required:
-            try:
-                __import__(module)
-            except ImportError:
-                missing.append(module)
-        if not missing and not force:
-            return True
-    except Exception:
-        pass
+    missing = missing_required_modules()
+    if not missing and not force:
+        return True
 
     choice = prompt_user("Do you want to install requirements? (y/n): ").strip().lower()
     if choice != 'y':
@@ -175,7 +244,12 @@ def install_requirements(force=False):
         return False
     log_message("INFO", "installing requirements, please wait...")
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(requirements_path)])
+        refresh_optional_imports()
+        still_missing = missing_required_modules()
+        if still_missing:
+            log_message("ERROR", f"still missing after install: {', '.join(still_missing)}")
+            return False
         log_message("SUCCESS", "requirements installed successfully!")
         return True
     except subprocess.CalledProcessError:
@@ -183,27 +257,15 @@ def install_requirements(force=False):
         return False
 
 
-# Avoid prompting during import or test execution. Only run the install flow when
-# the script is being launched directly in an interactive terminal.
-try:
+def configure_stdio():
     if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
         try:
             sys.stdout.reconfigure(encoding='utf-8')
         except AttributeError:
             sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
-    import asyncio
-    if os.environ.get("LENINJA_SKIP_SETUP") != "1":
-        install_requirements()
-    import truedriver as uc
-except Exception as e:
-    with open("startup_error.txt", "w", encoding="utf-8") as f:
-        f.write(f"IMPORT ERROR: {str(e)}\n\n")
-        f.write(traceback.format_exc())
-    log_message("ERROR", "fatal error during startup")
-    log_message("ERROR", f"{str(e)}")
-    log_message("INFO", "detailed log saved to 'startup_error.txt'")
-    prompt_user("press enter to exit")
-    sys.exit(1)
+
+
+uc = None
 
 
 @dataclass
@@ -277,6 +339,7 @@ try:
     GROQ_AVAILABLE = True
 except ImportError:
     GROQ_AVAILABLE = False
+    Groq = None
 
 
 LENINJA_EXT_ID = "dknlfmjaanfblgfdfebhijalfmhmjjjo"
@@ -415,16 +478,341 @@ async def setup_leninja(log_func=None):
     return ext_path
 
 
-def get_brave_path() -> Optional[str]:
-    paths = [
-        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-        r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
-    ]
-    for p in paths:
-        if os.path.exists(p):
-            return p
+BROWSER_SETTINGS = {"name": "auto", "path": None}
+
+# Auto mode launches DuckDuckGo.exe only. chrome.exe is never started.
+BROWSER_EXECUTABLES = {
+    "duckduckgo": [
+        os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\DuckDuckGo.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\Application\DuckDuckGo.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo\browser\DuckDuckGo.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\DuckDuckGo\DuckDuckGo.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\DuckDuckGo\Application\DuckDuckGo.exe"),
+        r"C:\Program Files\DuckDuckGo\DuckDuckGo.exe",
+        r"C:\Program Files\DuckDuckGo\Application\DuckDuckGo.exe",
+        r"C:\Program Files (x86)\DuckDuckGo\DuckDuckGo.exe",
+        r"C:\Program Files (x86)\DuckDuckGo\Application\DuckDuckGo.exe",
+        "/Applications/DuckDuckGo.app/Contents/MacOS/DuckDuckGo",
+        "/usr/bin/duckduckgo-browser",
+    ],
+}
+BROWSER_SEARCH_ORDER = ("duckduckgo",)
+BLOCKED_AUTO_BROWSERS = (
+    "brave",
+    "chrome",
+    "msedge",
+    "edge",
+    "google-chrome",
+    "vivaldi",
+    "chromium",
+    "thorium",
+    "arc",
+)
+
+
+def first_existing_path(paths):
+    for path in paths:
+        resolved = resolve_browser_executable(path)
+        if resolved:
+            return resolved
     return None
+
+
+def is_browser_executable(path):
+    if not path or not os.path.isfile(path):
+        return False
+    lower = path.lower()
+    if lower.endswith((".lnk", ".url", ".bat", ".cmd", ".msi")):
+        return False
+    if lower.endswith(".exe"):
+        return True
+    if os.name == "nt":
+        return False
+    return os.access(path, os.X_OK)
+
+
+def resolve_shortcut_target(path):
+    if not path or not str(path).lower().endswith(".lnk") or not os.path.isfile(path):
+        return None
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        data = b""
+    candidates = []
+    if data:
+        for match in re.finditer(rb"[A-Za-z]:\\(?:[^\\\x00]+\\)*[^\\\x00]+\.exe", data, re.I):
+            candidates.append(match.group().decode("ascii", "ignore"))
+        utf16 = data.decode("utf-16le", errors="ignore")
+        for match in re.finditer(r"[A-Za-z]:\\(?:[^\\:*?\"<>|\x00]+\\)*[^\\:*?\"<>|\x00]+\.exe", utf16, re.I):
+            candidates.append(match.group())
+    if os.name == "nt":
+        try:
+            quoted = json.dumps(os.path.abspath(path))
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"(New-Object -ComObject WScript.Shell).CreateShortcut({quoted}).TargetPath",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=0x08000000,
+            )
+            target = (completed.stdout or "").strip().strip('"')
+            if target:
+                candidates.insert(0, target)
+        except Exception:
+            pass
+    for candidate in candidates:
+        if is_browser_executable(candidate):
+            return candidate
+        nested = resolve_browser_executable(candidate)
+        if nested:
+            return nested
+    return None
+
+
+def resolve_browser_executable(path):
+    if not path:
+        return None
+    path = os.path.expandvars(os.path.expanduser(str(path).strip().strip('"').strip("'")))
+    if not path:
+        return None
+    if path.lower().endswith(".lnk"):
+        return resolve_shortcut_target(path)
+    if os.path.isdir(path):
+        for name in ("DuckDuckGo.exe", "duckduckgo.exe"):
+            for nested in (os.path.join(path, name), os.path.join(path, "Application", name)):
+                if is_browser_executable(nested):
+                    return nested
+        return None
+    if is_browser_executable(path):
+        return path
+    return None
+
+
+def browser_label(path, fallback="duckduckgo"):
+    if not path:
+        return fallback
+    lower = path.lower()
+    name = os.path.splitext(os.path.basename(path))[0].lower()
+    if name == "chrome" or name == "google-chrome":
+        return "chrome"
+    if "duckduckgo" in lower or name in ("duckduckgo", "ddg"):
+        return "duckduckgo"
+    if "thorium" in lower:
+        return "thorium"
+    if "vivaldi" in lower:
+        return "vivaldi"
+    if "brave" in lower:
+        return "brave"
+    if "msedge" in lower or "microsoft\\edge" in lower or "microsoft/edge" in lower:
+        return "edge"
+    if name in ("chromium",):
+        return "chromium"
+    if "google" in lower and name == "chrome":
+        return "chrome"
+    return name or fallback
+
+
+def is_windowsapps_alias(path):
+    blob = str(path or "").lower().replace("/", "\\")
+    return "\\microsoft\\windowsapps\\" in blob
+
+
+def is_duckduckgo_executable(path):
+    if not path or is_windowsapps_alias(path):
+        return False
+    path = os.path.expandvars(os.path.expanduser(str(path).strip().strip('"').strip("'")))
+    base = os.path.splitext(os.path.basename(path))[0].lower()
+    if base != "duckduckgo":
+        return False
+    lower = path.lower().replace("/", "\\")
+    if "\\windowsbrowser\\duckduckgo.exe" in lower or "duckduckgo.desktopbrowser" in lower:
+        return True
+    if is_browser_executable(path):
+        return True
+    try:
+        return os.path.exists(path) and path.lower().endswith(".exe")
+    except OSError:
+        return False
+
+
+def is_blocked_discord_browser(path, name=""):
+    if is_duckduckgo_executable(path):
+        return False
+    return True
+
+
+def configure_browser(config=None):
+    config = config or {}
+    explicit = str(config.get("browser_path") or "").strip().strip('"').strip("'") or None
+    BROWSER_SETTINGS["name"] = "duckduckgo"
+    if explicit:
+        resolved = resolve_browser_executable(explicit)
+        if resolved and is_duckduckgo_executable(resolved):
+            BROWSER_SETTINGS["path"] = resolved
+        else:
+            if explicit:
+                log_message("WARNING", "ignoring browser_path because it is not DuckDuckGo.exe (Chrome/Brave/Edge are blocked)")
+            BROWSER_SETTINGS["path"] = None
+    else:
+        BROWSER_SETTINGS["path"] = None
+    return BROWSER_SETTINGS
+
+
+def _run_windows_command(command, timeout=15):
+    kwargs = {
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x08000000
+    return subprocess.run(command, **kwargs)
+
+
+def duckduckgo_from_appx_package():
+    if os.name != "nt":
+        return []
+    script = (
+        "$names = @('DuckDuckGo.DesktopBrowser','*DuckDuckGo*'); "
+        "$pkgs = foreach ($n in $names) { Get-AppxPackage -Name $n -ErrorAction SilentlyContinue }; "
+        "$pkgs = @($pkgs | Sort-Object PackageFullName -Unique); "
+        "foreach ($p in $pkgs) { "
+        "  if (-not $p.InstallLocation) { continue }; "
+        "  $cands = @("
+        "    (Join-Path $p.InstallLocation 'WindowsBrowser\\DuckDuckGo.exe'),"
+        "    (Join-Path $p.InstallLocation 'DuckDuckGo.exe'),"
+        "    (Join-Path $p.InstallLocation 'Application\\DuckDuckGo.exe')"
+        "  ); "
+        "  foreach ($c in $cands) { if (Test-Path -LiteralPath $c) { Write-Output $c } } "
+        "}"
+    )
+    try:
+        completed = _run_windows_command(
+            ["powershell", "-NoProfile", "-Command", script],
+            timeout=20,
+        )
+    except Exception:
+        return []
+    found = []
+    for line in (completed.stdout or "").splitlines():
+        candidate = line.strip().strip('"')
+        if candidate and is_duckduckgo_executable(candidate):
+            found.append(candidate)
+    return found
+
+
+def duckduckgo_from_where():
+    names = ["DuckDuckGo.exe", "duckduckgo.exe"]
+    found = []
+    which = getattr(shutil, "which", None)
+    if which:
+        for name in names:
+            located = which(name)
+            if located and is_duckduckgo_executable(located):
+                found.append(located)
+    if os.name == "nt":
+        try:
+            completed = _run_windows_command(["where.exe", "DuckDuckGo.exe"], timeout=10)
+            for line in (completed.stdout or "").splitlines():
+                located = line.strip().strip('"')
+                if located and is_duckduckgo_executable(located):
+                    found.append(located)
+        except Exception:
+            pass
+    return found
+
+
+def discover_duckduckgo_executables():
+    found = []
+    seen = set()
+    roots = [
+        os.path.expandvars(r"%LOCALAPPDATA%\DuckDuckGo"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\DuckDuckGo"),
+        r"C:\Program Files\DuckDuckGo",
+        r"C:\Program Files (x86)\DuckDuckGo",
+        os.path.expandvars(r"%PROGRAMFILES%\WindowsApps"),
+    ]
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                depth = dirpath[len(root):].count(os.sep)
+                limit = 6 if "windowsapps" in root.lower() else 5
+                if depth > limit:
+                    dirnames.clear()
+                    continue
+                if "windowsapps" in root.lower() and "duckduckgo" not in dirpath.lower() and depth > 1:
+                    dirnames[:] = [name for name in dirnames if "duckduckgo" in name.lower()]
+                for filename in filenames:
+                    if filename.lower() != "duckduckgo.exe":
+                        continue
+                    full = os.path.join(dirpath, filename)
+                    try:
+                        key = os.path.normcase(os.path.abspath(full))
+                    except OSError:
+                        continue
+                    if key in seen:
+                        continue
+                    if is_duckduckgo_executable(full):
+                        seen.add(key)
+                        found.append(full)
+        except OSError:
+            continue
+    return found
+
+
+def find_browser_path(preferred=None, explicit_path=None):
+    explicit_path = explicit_path if explicit_path is not None else BROWSER_SETTINGS.get("path")
+
+    def first_duckduckgo():
+        candidates = (
+            list(duckduckgo_from_appx_package())
+            + list(BROWSER_EXECUTABLES.get("duckduckgo") or [])
+            + list(discover_duckduckgo_executables())
+            + list(duckduckgo_from_where())
+        )
+        for path in candidates:
+            if is_windowsapps_alias(path):
+                continue
+            resolved = resolve_browser_executable(path)
+            if resolved and is_windowsapps_alias(resolved):
+                continue
+            if resolved and is_duckduckgo_executable(resolved):
+                return resolved, "duckduckgo"
+            if is_duckduckgo_executable(path):
+                return path, "duckduckgo"
+        return None, "duckduckgo"
+
+    if explicit_path:
+        resolved = resolve_browser_executable(explicit_path)
+        if resolved and is_duckduckgo_executable(resolved) and not is_windowsapps_alias(resolved):
+            return resolved, "duckduckgo"
+        if is_windowsapps_alias(explicit_path) or is_windowsapps_alias(resolved or ""):
+            log_message(
+                "WARNING",
+                "WindowsApps\\DuckDuckGo.exe is a Store stub and cannot be automated; searching for WindowsBrowser\\DuckDuckGo.exe",
+            )
+        else:
+            log_message(
+                "WARNING",
+                "browser_path is not DuckDuckGo.exe (Chrome is blocked). Searching for DuckDuckGo Browser",
+            )
+
+    found, name = first_duckduckgo()
+    if found:
+        return found, name
+    return None, "duckduckgo"
+
+
+def get_brave_path() -> Optional[str]:
+    path, _name = find_browser_path()
+    return path
 
 
 class GroqCaptchaSolver:
@@ -469,16 +857,6 @@ JS_UTILS = '''
     };
 })();
 '''
-
-
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-
-loop.set_exception_handler(lambda loop, context: None)
 
 
 async def animated_cooldown(total_seconds):
@@ -939,6 +1317,295 @@ async def rotate_mullvad_ip():
     return new_ip is not None and new_ip != current_ip
 
 
+async def require_vpn_connection():
+    connected = await mullvad_ensure_connected()
+    if not connected:
+        log_message("ERROR", "vpn is enabled but mullvad failed to connect; stopping")
+        return False
+    return True
+
+
+def response_json(response):
+    try:
+        return response.json()
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def parse_colon_credentials(account):
+    """Parse email:password[:refreshToken:clientId], keeping the domain attached to the local part."""
+    account = str(account).strip().strip('"').strip("'")
+    if not account:
+        return None
+    at = account.find("@")
+    if at == -1:
+        return None
+    sep = account.find(":", at)
+    if sep == -1:
+        return None
+    email_addr = account[:sep].strip()
+    remainder = account[sep + 1:]
+    if not remainder:
+        return None
+    if ":" not in remainder:
+        password, refresh_token, uuid = remainder.strip(), None, None
+    else:
+        password, rest = remainder.split(":", 1)
+        password = password.strip()
+        rest = rest.strip()
+        if ":" in rest:
+            refresh_token, uuid = rest.rsplit(":", 1)
+            refresh_token = refresh_token.strip() or None
+            uuid = uuid.strip() or None
+        else:
+            refresh_token, uuid = rest or None, None
+    if email_addr and password and "@" in email_addr:
+        return email_addr, password, refresh_token, uuid
+    return None
+
+
+def parse_mailbox_account(account):
+    """Parse a provider mailbox payload into email, password, refresh token, and client id."""
+    email_addr = password = refresh_token = uuid = None
+    if isinstance(account, dict):
+        raw = account.get("account") or account.get("mail") or account.get("line")
+        if isinstance(raw, str):
+            parsed = parse_colon_credentials(raw)
+            if parsed:
+                return parsed
+        email_addr = account.get("email") or account.get("address") or account.get("username")
+        password = account.get("password") or account.get("pass")
+        refresh_token = (
+            account.get("refresh_token")
+            or account.get("refreshToken")
+            or account.get("refresh-token")
+        )
+        uuid = (
+            account.get("client_id")
+            or account.get("clientId")
+            or account.get("client-id")
+            or account.get("uuid")
+        )
+    elif isinstance(account, str):
+        parsed = parse_colon_credentials(account)
+        if parsed:
+            return parsed
+        parts = [part.strip() for part in re.split(r"----|\||;|\t|\r?\n", account, maxsplit=3)]
+        if len(parts) >= 2 and "@" in parts[0] and all(parts[:2]):
+            email_addr, password = parts[:2]
+            refresh_token = parts[2] if len(parts) >= 3 and parts[2] else None
+            uuid = parts[3] if len(parts) >= 4 and parts[3] else None
+    if email_addr and password:
+        return str(email_addr).strip(), str(password), refresh_token, uuid
+    return None
+
+
+def extract_discord_verify_link(content):
+    if not content:
+        return None
+    text = str(content).replace("&amp;", "&").replace("\\/", "/")
+    patterns = (
+        r"https?://(?:www\.)?discord\.com/verify\?token=[^\s\"'<>\\]+",
+        r"https?://click\.discord\.com/ls/click\?[^\s\"'<>\\]+",
+    )
+    found = []
+    for pattern in patterns:
+        for url in re.findall(pattern, text, re.IGNORECASE):
+            url = url.split("\n")[0].strip()
+            url = re.sub(r"[.,;>)]+$", "", url)
+            if len(url) > 50:
+                found.append(url)
+    if not found:
+        return None
+    verify_links = [link for link in found if "discord.com/verify" in link.lower()]
+    links = verify_links or found
+    links.sort(key=len, reverse=True)
+    return links[0]
+
+
+def hotmail007_error(data):
+    if not isinstance(data, dict):
+        return None
+    message = data.get("message") or data.get("msg") or ""
+    code = data.get("code")
+    failed = data.get("success") is False or code not in (None, 0, "0", True, 200)
+    if not failed:
+        return None
+    if code in (20011, "20011") or "authentication failed" in str(message).lower():
+        return (
+            "API key rejected by Hotmail007. Put a current clientKey in "
+            "config/config.yaml (hotmail007_key) from https://hotmail007.com"
+        )
+    return message or f"code {code}"
+
+
+def mailbox_records(payload):
+    if payload is None:
+        return []
+    if isinstance(payload, dict):
+        records = payload.get("data", payload)
+        if isinstance(records, dict):
+            nested = records.get("accounts") or records.get("list") or records.get("mail")
+            records = nested if nested is not None else [records]
+        if isinstance(records, str):
+            records = [records]
+        return records if isinstance(records, list) else []
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, str):
+        return [payload]
+    return []
+
+
+async def run_blocking(func, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def fetch_mail_domains(api_base, api_key, provider_name):
+    if requests is None:
+        log_message("ERROR", f"{provider_name} requires curl_cffi")
+        return None
+    try:
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        response = requests.get(f"{api_base}/domains", headers=headers, timeout=15, impersonate="chrome124")
+        if response.status_code != 200:
+            log_message("ERROR", f"{provider_name} domain request failed: HTTP {response.status_code}")
+            return None
+        data = response_json(response)
+        if not isinstance(data, dict):
+            log_message("ERROR", f"{provider_name} returned an invalid domain payload")
+            return None
+        members = data.get("hydra:member", [])
+        if not isinstance(members, list):
+            log_message("ERROR", f"{provider_name} domain list is not an array")
+            return None
+        valid_domains = []
+        for item in members:
+            if not isinstance(item, dict):
+                continue
+            domain = item.get("domain")
+            if domain and item.get("isVerified") and not is_domain_blacklisted(domain):
+                valid_domains.append(domain)
+        return valid_domains or None
+    except Exception as e:
+        log_message("ERROR", f"{provider_name} domain lookup failed: {type(e).__name__}")
+        return None
+
+
+async def create_mail_inbox(provider):
+    name = getattr(provider, "provider_name", "Mailbox")
+    try:
+        domains = await run_blocking(provider.get_domains)
+        if not domains:
+            return None
+        domain = random.choice(domains)
+        user = "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(10, 16)))
+        provider.email = f"{user}@{domain}"
+        provider.password = create_random_string(12)
+
+        headers = {"Content-Type": "application/json"}
+        if provider.api_key:
+            headers["Authorization"] = f"Bearer {provider.api_key}"
+        payload = {
+            "address": provider.email,
+            "password": provider.password,
+            "expiresIn": 0 if provider.never_expire else 86400,
+        }
+        create_resp = await run_blocking(
+            requests.post, f"{provider.api_base}/accounts", headers=headers, json=payload, timeout=15, impersonate="chrome124"
+        )
+        if create_resp.status_code not in [200, 201]:
+            log_message("ERROR", f"{name} inbox create failed: HTTP {create_resp.status_code}")
+            return None
+
+        token_payload = {"address": provider.email, "password": provider.password}
+        token_resp = await run_blocking(
+            requests.post, f"{provider.api_base}/token", headers={"Content-Type": "application/json"}, json=token_payload, timeout=15, impersonate="chrome124"
+        )
+        if token_resp.status_code != 200:
+            log_message("ERROR", f"{name} token request failed: HTTP {token_resp.status_code}")
+            return None
+        token_data = response_json(token_resp)
+        if not isinstance(token_data, dict) or not token_data.get("token"):
+            log_message("ERROR", f"{name} token response was invalid")
+            return None
+        provider.auth_token = token_data.get("token")
+        provider.account_id = token_data.get("id")
+        return provider.email
+    except Exception as e:
+        log_message("ERROR", f"{name} mailbox error: {type(e).__name__}")
+    return None
+
+
+async def get_mail_verification_url(provider):
+    if not provider.auth_token:
+        return None
+    name = getattr(provider, "provider_name", "Mailbox")
+    headers = {"Authorization": f"Bearer {provider.auth_token}"}
+    try:
+        for _ in range(3):
+            response = await run_blocking(
+                requests.get, f"{provider.api_base}/messages", headers=headers, timeout=15, impersonate="chrome124"
+            )
+            if response.status_code != 200:
+                await asyncio.sleep(1)
+                continue
+            data = response_json(response)
+            messages = data.get("hydra:member", []) if isinstance(data, dict) else []
+            if not isinstance(messages, list):
+                await asyncio.sleep(1)
+                continue
+            for mail in messages:
+                if not isinstance(mail, dict):
+                    continue
+                subject = str(mail.get("subject", "") or "").lower()
+                from_data = mail.get("from", {}) or {}
+                from_address = str(from_data.get("address", "") or "").lower()
+                from_name = str(from_data.get("name", "") or "").lower()
+                is_discord = "discord" in from_address or "discord" in from_name
+                has_verify = "verify" in subject or "confirm" in subject or "verification" in subject
+                if not (is_discord or has_verify):
+                    continue
+                msg_id = mail.get("id")
+                if not msg_id:
+                    continue
+                detail_resp = await run_blocking(
+                    requests.get, f"{provider.api_base}/messages/{msg_id}", headers=headers, timeout=15, impersonate="chrome124"
+                )
+                if detail_resp.status_code != 200:
+                    continue
+                msg_detail = response_json(detail_resp) or {}
+                content_parts = []
+                text_body = str(msg_detail.get("text", "") or "")
+                if text_body:
+                    content_parts.append(text_body)
+                for html_body in msg_detail.get("html", []) or []:
+                    content_parts.append(str(html_body or ""))
+                full_content = "\n".join(content_parts)
+                patterns = [
+                    r'https?://(?:www\.)?discord\.com/verify\?token=[a-zA-Z0-9\-\._~%]+',
+                    r'https?://click\.discord\.com/ls/click\?upn=[a-zA-Z0-9\-\._~%]+',
+                ]
+                found_links = []
+                for pattern in patterns:
+                    for url in re.findall(pattern, full_content, re.IGNORECASE):
+                        url = url.replace("\\/", "/").split("\n")[0].strip().replace("&amp;", "&")
+                        url = re.sub(r"[.,;>]$", "", url)
+                        if len(url) > 50:
+                            found_links.append(url)
+                if found_links:
+                    verify_links = [link for link in found_links if "discord.com/verify" in link]
+                    links = verify_links or found_links
+                    links.sort(key=len, reverse=True)
+                    return links[0]
+            await asyncio.sleep(1)
+    except Exception as e:
+        log_message("WARNING", f"{name} mailbox check failed: {type(e).__name__}")
+    return None
+
+
 class MailboxClient:
     def __init__(self, api_token):
         self.email = None
@@ -952,17 +1619,28 @@ class MailboxClient:
             headers = {"X-API-KEY": self.token}
             params = {"type": "discord", "limit": 20}
             async with httpx.AsyncClient() as session:
-                response = await session.get(f"{self.api_base}/getDomains", headers=headers, params=params)
-                if response.status_code == 200:
-                    data = response.json()
-                    if data:
-                        excluded = ["altmails.icu"]
-                        filtered = [d for d in data if not d.endswith('.store') and not d.endswith('.ng') and d not in excluded]
-                        if filtered:
-                            return random.choice(filtered)
-                        return random.choice([d for d in data if d not in excluded]) if any(d not in excluded for d in data) else "cybertemp.xyz"
-        except:
-            pass
+                response = await session.get(f"{self.api_base}/getDomains", headers=headers, params=params, timeout=15)
+                if response.status_code != 200:
+                    log_message("ERROR", f"Cybertemp domain request failed: HTTP {response.status_code}")
+                    return "cybertemp.xyz"
+                data = response_json(response)
+                if not isinstance(data, list):
+                    log_message("ERROR", "Cybertemp returned an invalid domain list")
+                    return "cybertemp.xyz"
+                domains = [d for d in data if isinstance(d, str)]
+                if not domains:
+                    log_message("ERROR", "Cybertemp returned no usable domains")
+                    return "cybertemp.xyz"
+                excluded = ["altmails.icu"]
+                filtered = [d for d in domains if not d.endswith('.store') and not d.endswith('.ng') and d not in excluded]
+                if filtered:
+                    return random.choice(filtered)
+                usable = [d for d in domains if d not in excluded]
+                return random.choice(usable) if usable else "cybertemp.xyz"
+        except httpx.RequestError as e:
+            log_message("ERROR", f"Cybertemp domain lookup failed: {type(e).__name__}")
+        except Exception as e:
+            log_message("ERROR", f"Cybertemp domain error: {type(e).__name__}")
         return "cybertemp.xyz"
 
     async def create_inbox(self):
@@ -1011,20 +1689,107 @@ class MailboxClient:
                 pass
         return None
 
+HOTMAIL007_HOST = "https://gapi.hotmail007.com"
+HOTMAIL007_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def hotmail007_async_client():
+    """Direct IPv4 HTTPS. Ignore system proxies that cause ConnectError on Windows."""
+    headers = {"User-Agent": HOTMAIL007_UA, "Accept": "application/json"}
+    try:
+        timeout = httpx.Timeout(30.0, connect=8.0)
+        transport = httpx.AsyncHTTPTransport(retries=2, local_address="0.0.0.0")
+        return httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            trust_env=False,
+            headers=headers,
+            transport=transport,
+        )
+    except (TypeError, AttributeError):
+        return httpx.AsyncClient()
+
+
+async def hotmail007_get(url, params=None, timeout=30):
+    last_error = None
+    for attempt in range(3):
+        try:
+            async with hotmail007_async_client() as client:
+                return await client.get(url, params=params, timeout=timeout)
+        except httpx.RequestError as e:
+            last_error = e
+            if requests is not None:
+                try:
+                    return await run_blocking(
+                        requests.get,
+                        url,
+                        params=params,
+                        timeout=timeout,
+                        impersonate="chrome124",
+                        headers={"User-Agent": HOTMAIL007_UA, "Accept": "application/json"},
+                    )
+                except Exception as e2:
+                    last_error = e2
+            await asyncio.sleep(0.35 * (attempt + 1))
+    if last_error:
+        raise last_error
+    raise RuntimeError("Hotmail007 request failed")
+
+
 class Hotmail007Provider:
-    def __init__(self, client_key, mail_type="hotmail"):
-        self.client_key = client_key
-        self.mail_type = "hotmail" if str(mail_type).strip().lower() == "8" else str(mail_type).strip().lower()
+    def __init__(self, client_key, mail_type="hotmail", product_id=None):
+        self.client_key = str(client_key or "").strip().strip('"').strip("'")
+        raw_type = str(mail_type or "hotmail").strip()
+        if raw_type.lower() == "8" or raw_type.isdigit():
+            self.mail_type = raw_type
+            self.product_id = int(raw_type) if product_id in (None, "", 0, "0") else product_id
+        else:
+            self.mail_type = raw_type
+            self.product_id = product_id
         self.email = None
         self.password = None
         self.refresh_token = None
         self.uuid = None
-        self.base_api = "https://gapi.hotmail007.com/api"
+        self.account_line = None
+        self.mail_since = None
+        self.host = HOTMAIL007_HOST
+        self.base_api = f"{self.host}/api"
         self.ms_client_id = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+
+    def _product_id(self):
+        raw = self.product_id
+        if raw in (None, "", 0, "0"):
+            mail_type = str(self.mail_type).strip()
+            if mail_type.isdigit():
+                return int(mail_type)
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _auth_params(self, extra=None):
+        params = {"clientKey": self.client_key}
+        if extra:
+            params.update(extra)
+        return params
+
+    def credential_line(self):
+        if self.account_line:
+            return self.account_line
+        parts = [self.email, self.password, self.refresh_token, self.uuid or self.ms_client_id]
+        if not self.email or not self.password:
+            return None
+        return ":".join(str(part) for part in parts if part)
 
     async def get_access_token(self, r_token=None, c_id=None):
         try:
-            token = (r_token or self.refresh_token).rstrip("$")
+            token = (r_token or self.refresh_token or "").rstrip("$")
+            if not token:
+                return None
             cid = c_id or self.uuid or self.ms_client_id
             url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
             data = {
@@ -1041,75 +1806,179 @@ class Hotmail007Provider:
             pass
         return None
 
-    async def create_inbox(self):
-        url = f"{self.base_api}/mail/getMail?clientKey={self.client_key}&mailType={self.mail_type}&quantity=1"
+    def _apply_account(self, account):
+        parsed = parse_mailbox_account(account)
+        if not parsed:
+            return None
+        self.email, self.password, self.refresh_token, self.uuid = parsed
+        if isinstance(account, str) and account.strip():
+            self.account_line = account.strip().strip('"').strip("'")
+        else:
+            self.account_line = self.credential_line()
+        self.mail_since = max(0, int(time.time()) - 5)
+        return self.email
+
+    async def _resolve_product_id(self):
+        known = self._product_id()
+        if known:
+            return known
+        wanted = str(self.mail_type).strip().lower().replace(" ", "-")
         try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(url, timeout=30)
-                if r.status_code != 200:
-                    log_message("ERROR", f"Hotmail007 request failed: HTTP {r.status_code}")
-                    return None
+            r = await hotmail007_get(f"{self.host}/open/stock", timeout=20)
+            data = response_json(r) or {}
+            products = data.get("data") if isinstance(data, dict) else None
+            if not isinstance(products, list):
+                return None
+            matches = []
+            for item in products:
+                if not isinstance(item, dict):
+                    continue
+                mail_type = str(item.get("mailType") or "").strip().lower().replace(" ", "-")
+                name = str(item.get("name") or "").strip().lower().replace(" ", "-")
+                if wanted in (mail_type, name) or mail_type == wanted:
+                    try:
+                        stock = int(item.get("stock") or 0)
+                    except (TypeError, ValueError):
+                        stock = 0
+                    matches.append((stock, item.get("productId")))
+            in_stock = [pid for stock, pid in matches if stock > 0 and pid not in (None, "")]
+            if in_stock:
+                return in_stock[0]
+            if matches and matches[0][1] not in (None, ""):
+                return matches[0][1]
+        except Exception:
+            return None
+        return None
 
-                try:
-                    data = r.json()
-                except ValueError:
-                    log_message("ERROR", "Hotmail007 returned invalid JSON")
-                    return None
+    async def create_inbox(self):
+        if not self.client_key:
+            log_message("ERROR", "Hotmail007 API key is empty. Set hotmail007_key in config/config.yaml")
+            return None
+        try:
+            product_id = await self._resolve_product_id()
+            if product_id:
+                r = await hotmail007_get(
+                    f"{self.host}/open/buy",
+                    params=self._auth_params({"productId": product_id, "quantity": 1}),
+                    timeout=30,
+                )
+            else:
+                r = await hotmail007_get(
+                    f"{self.base_api}/mail/getMail",
+                    params=self._auth_params({"mailType": self.mail_type, "quantity": 1}),
+                    timeout=30,
+                )
+            if r.status_code != 200:
+                log_message("ERROR", f"Hotmail007 request failed: HTTP {r.status_code}")
+                return None
 
-                if isinstance(data, dict) and data.get("success") is False:
-                    message = data.get("message") or data.get("msg") or "request rejected"
-                    log_message("ERROR", f"Hotmail007 rejected request: {message}")
-                    return None
+            data = response_json(r)
+            if data is None:
+                log_message("ERROR", "Hotmail007 returned invalid JSON")
+                return None
 
-                accounts = data.get("data", []) if isinstance(data, dict) else data
-                if isinstance(accounts, dict):
-                    nested_accounts = accounts.get("accounts") or accounts.get("list")
-                    accounts = nested_accounts if nested_accounts is not None else [accounts]
-                if isinstance(accounts, str):
-                    accounts = [accounts]
-                if not isinstance(accounts, list) or not accounts:
-                    log_message("ERROR", "Hotmail007 returned no mailbox")
-                    return None
+            rejected = hotmail007_error(data)
+            if rejected and product_id and "API key rejected" not in rejected:
+                r = await hotmail007_get(
+                    f"{self.base_api}/mail/getMail",
+                    params=self._auth_params({"mailType": self.mail_type, "quantity": 1}),
+                    timeout=30,
+                )
+                data = response_json(r)
+                rejected = hotmail007_error(data) if data else rejected
+            if rejected:
+                log_message("ERROR", f"Hotmail007 rejected request: {rejected}")
+                return None
+            if data is None:
+                log_message("ERROR", "Hotmail007 returned invalid JSON")
+                return None
 
-                account = accounts[0]
-                if isinstance(account, dict):
-                    self.email = account.get("email") or account.get("address") or account.get("username")
-                    self.password = account.get("password") or account.get("pass")
-                    self.refresh_token = (
-                        account.get("refresh_token")
-                        or account.get("refreshToken")
-                        or account.get("refresh-token")
-                    )
-                    self.uuid = (
-                        account.get("client_id")
-                        or account.get("clientId")
-                        or account.get("client-id")
-                        or account.get("uuid")
-                    )
-                    if self.email and self.password and self.refresh_token:
-                        return self.email.strip()
-                elif isinstance(account, str):
-                    parts = [part.strip() for part in re.split(r"----|\||;|,|\t|\r?\n", account, maxsplit=3)]
-                    if len(parts) < 3:
-                        parts = [part.strip() for part in account.split(":", 3)]
-                    if len(parts) >= 2 and "@" in parts[0] and all(parts[:2]):
-                        self.email, self.password = parts[:2]
-                        self.refresh_token = parts[2] if len(parts) >= 3 and parts[2] else None
-                        self.uuid = parts[3] if len(parts) >= 4 else None
-                        return self.email
+            accounts = [item for item in mailbox_records(data) if item not in ("", None, [], {})]
+            if not accounts:
+                log_message("ERROR", "Hotmail007 returned no mailbox")
+                return None
 
-                shape = type(account).__name__
-                if isinstance(account, dict):
-                    shape = f"object fields: {', '.join(sorted(account.keys()))}"
-                elif isinstance(account, str):
-                    separators = [separator for separator in ("----", "|", ";", ",", ":", "\\t", "\\n") if separator in account]
-                    field_lengths = [len(field.strip()) for field in re.split(r"----|\||;|,|\t|\r?\n|:", account)]
-                    shape = f"text with {len(account)} characters; separators={separators or ['none']}; field_lengths={field_lengths}"
-                log_message("ERROR", f"Hotmail007 returned unsupported mailbox format ({shape})")
+            account = accounts[0]
+            applied = self._apply_account(account)
+            if applied:
+                return applied
+
+            shape = type(account).__name__
+            if isinstance(account, dict):
+                shape = f"object fields: {', '.join(sorted(account.keys()))}"
+            elif isinstance(account, str):
+                separators = [separator for separator in ("----", "|", ";", ",", ":", "\\t", "\\n") if separator in account]
+                field_lengths = [len(field.strip()) for field in re.split(r"----|\||;|,|\t|\r?\n|:", account)]
+                shape = f"text with {len(account)} characters; separators={separators or ['none']}; field_lengths={field_lengths}"
+            log_message("ERROR", f"Hotmail007 returned unsupported mailbox format ({shape})")
         except httpx.RequestError as e:
-            log_message("ERROR", f"Hotmail007 connection failed: {type(e).__name__}")
+            detail = str(e).strip() or type(e).__name__
+            log_message(
+                "ERROR",
+                f"Hotmail007 connection failed: {type(e).__name__} ({detail[:160]}). "
+                "gapi.hotmail007.com must be reachable without a system proxy; turn off Windows proxy/VPN and retry",
+            )
         except Exception as e:
-            log_message("ERROR", f"Hotmail007 mailbox error: {type(e).__name__}")
+            detail = str(e).strip() or type(e).__name__
+            log_message(
+                "ERROR",
+                f"Hotmail007 mailbox error: {type(e).__name__} ({detail[:160]})",
+            )
+        return None
+
+    def _mail_from_payload(self, payload):
+        if isinstance(payload, dict):
+            nested = payload.get("data")
+            if isinstance(nested, dict):
+                payload = nested
+            elif isinstance(nested, list) and nested:
+                payload = nested[0]
+        if not isinstance(payload, dict):
+            return extract_discord_verify_link(payload)
+        html = payload.get("html") or payload.get("body") or payload.get("content") or ""
+        text = payload.get("text") or payload.get("body_text") or ""
+        blob = "\n".join(
+            str(part) for part in (
+                payload.get("subject", ""),
+                payload.get("from", ""),
+                html,
+                text,
+            ) if part
+        )
+        return extract_discord_verify_link(blob)
+
+    async def get_provider_verification_url(self):
+        account = self.credential_line()
+        if not account:
+            return None
+        params = {
+            "clientKey": self.client_key,
+            "account": account,
+            "folder": "inbox",
+        }
+        if self.mail_since:
+            params["start_timestamp"] = self.mail_since
+        endpoints = (
+            f"{self.host}/open/mail/latest",
+            f"{self.host}/v1/mail/getFirstMail",
+        )
+        try:
+            for folder in ("inbox", "junkemail"):
+                params["folder"] = folder
+                for endpoint in endpoints:
+                    r = await hotmail007_get(endpoint, params=params, timeout=20)
+                    if r.status_code != 200:
+                        continue
+                    data = response_json(r)
+                    if data is None:
+                        continue
+                    if hotmail007_error(data):
+                        continue
+                    link = self._mail_from_payload(data)
+                    if link:
+                        return link
+        except Exception as e:
+            log_message("WARNING", f"Hotmail007 inbox lookup failed: {type(e).__name__}")
         return None
 
     async def get_imap_verification_url(self):
@@ -1140,9 +2009,6 @@ class Hotmail007Provider:
                     message = email.message_from_bytes(raw_message)
                     subject = str(email.header.make_header(email.header.decode_header(message.get("Subject", "")))).lower()
                     sender = message.get("From", "").lower()
-                    if "discord" not in subject and "discord" not in sender:
-                        continue
-
                     body_parts = []
                     if message.is_multipart():
                         for part in message.walk():
@@ -1155,13 +2021,10 @@ class Hotmail007Provider:
                         if payload:
                             body_parts.append(payload.decode(message.get_content_charset() or "utf-8", errors="replace"))
 
-                    body = "\n".join(body_parts)
-                    matches = re.findall(r"https://discord\.com/verify\?token=[^\s\"'<>]+", body)
-                    if matches:
-                        return matches[0]
-                    tracked_links = re.findall(r"https://click\.discord\.com/ls/click\?[^\s\"'<>]+", body)
-                    if tracked_links:
-                        return tracked_links[0]
+                    body = "\n".join([subject, sender, *body_parts])
+                    link = extract_discord_verify_link(body)
+                    if link:
+                        return link
             finally:
                 try:
                     mailbox.logout()
@@ -1176,45 +2039,37 @@ class Hotmail007Provider:
             return None
 
     async def get_verification_url(self):
-        if not self.refresh_token:
+        link = await self.get_provider_verification_url()
+        if link:
+            return link
+        if self.refresh_token:
+            access = await self.get_access_token()
+            if access:
+                try:
+                    async with httpx.AsyncClient() as client:
+                        r = await client.get(
+                            "https://graph.microsoft.com/v1.0/me/messages",
+                            headers={"Authorization": f"Bearer {access}"},
+                            params={"$top": 10, "$orderby": "receivedDateTime desc", "$select": "subject,body,from"},
+                            timeout=15
+                        )
+                        if r.status_code == 200:
+                            for msg in r.json().get("value", []):
+                                subj = msg.get("subject", "").lower()
+                                from_data = msg.get("from", {}).get("emailAddress", {})
+                                frm_addr = from_data.get("address", "").lower()
+                                frm_name = from_data.get("name", "").lower()
+                                is_discord = "discord" in frm_addr or "discord" in frm_name
+                                has_verify = "verify" in subj or "confirm" in subj or "verification" in subj
+                                if is_discord and has_verify:
+                                    body = msg.get("body", {}).get("content", "")
+                                    link = extract_discord_verify_link(body)
+                                    if link:
+                                        return link
+                except Exception:
+                    pass
+        if not self.account_line:
             return await self.get_imap_verification_url()
-        access = await self.get_access_token()
-        if not access:
-            return None
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    "https://graph.microsoft.com/v1.0/me/messages",
-                    headers={"Authorization": f"Bearer {access}"},
-                    params={"$top": 10, "$orderby": "receivedDateTime desc", "$select": "subject,body,from"},
-                    timeout=15
-                )
-                if r.status_code == 200:
-                    for msg in r.json().get("value", []):
-                        subj = msg.get("subject", "").lower()
-                        from_data = msg.get("from", {}).get("emailAddress", {})
-                        frm_addr = from_data.get("address", "").lower()
-                        frm_name = from_data.get("name", "").lower()
-                        is_discord = "discord" in frm_addr or "discord" in frm_name
-                        has_verify = "verify" in subj or "confirm" in subj or "verification" in subj
-                        if is_discord and has_verify:
-                            body = msg.get("body", {}).get("content", "")
-                            body = body.replace("&amp;", "&").replace("&quot;", '"').replace("&#39;", "'")
-                            matches = re.findall(r'https://discord\.com/verify\?token=[^\s"\'><]+', body)
-                            if matches:
-                                return matches[0]
-                            tracked_links = re.findall(r'https://click\.discord\.com/ls/click\?[^\s"\'><]+', body)
-                            for link in tracked_links:
-                                try:
-                                    async with httpx.AsyncClient() as check_client:
-                                        res = await check_client.get(link, follow_redirects=False, timeout=10)
-                                        target = res.headers.get("Location", "")
-                                        if "discord.com/verify" in target:
-                                            return link
-                                except Exception:
-                                    continue
-        except Exception:
-            pass
         return None
 
 
@@ -1253,27 +2108,31 @@ class ZeusXProvider:
         try:
             async with httpx.AsyncClient() as client:
                 r = await client.get(url, timeout=30)
-                if r.status_code == 200:
-                    data = r.json()
-                    accounts = data.get("data", [])
-                    if not accounts and isinstance(data, list):
-                        accounts = data
-                    
-                    if accounts:
-                        parts = accounts[0].split(":")
-                        if len(parts) >= 4:
-                            self.email = parts[0].strip()
-                            self.password = parts[1].strip()
-                            self.refresh_token = parts[2].strip()
-                            self.uuid = parts[3].strip()
-                            return self.email
-                        elif len(parts) >= 3:
-                            self.email = parts[0].strip()
-                            self.password = parts[1].strip()
-                            self.refresh_token = parts[2].strip()
-                            return self.email
-        except Exception:
-            pass
+                if r.status_code != 200:
+                    log_message("ERROR", f"Zeus-X request failed: HTTP {r.status_code}")
+                    return None
+                data = response_json(r)
+                if data is None:
+                    log_message("ERROR", "Zeus-X returned invalid JSON")
+                    return None
+                if isinstance(data, dict) and data.get("success") is False:
+                    message = data.get("message") or data.get("msg") or "request rejected"
+                    log_message("ERROR", f"Zeus-X rejected request: {message}")
+                    return None
+                accounts = mailbox_records(data)
+                if not accounts:
+                    log_message("ERROR", "Zeus-X returned no mailbox")
+                    return None
+                parsed = parse_mailbox_account(accounts[0])
+                if not parsed:
+                    log_message("ERROR", "Zeus-X returned unsupported mailbox format")
+                    return None
+                self.email, self.password, self.refresh_token, self.uuid = parsed
+                return self.email
+        except httpx.RequestError as e:
+            log_message("ERROR", f"Zeus-X connection failed: {type(e).__name__}")
+        except Exception as e:
+            log_message("ERROR", f"Zeus-X mailbox error: {type(e).__name__}")
         return None
 
     async def get_verification_url(self):
@@ -1328,115 +2187,16 @@ class DuckMailProvider:
         self.auth_token = None
         self.account_id = None
         self.never_expire = never_expire
+        self.provider_name = "DuckMail"
 
     def get_domains(self):
-        try:
-            headers = {}
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            response = requests.get(f"{self.api_base}/domains", headers=headers, timeout=15, impersonate="chrome124")
-            if response.status_code == 200:
-                data = response.json()
-                members = data.get("hydra:member", [])
-                valid_domains = []
-                for item in members:
-                    domain = item.get("domain")
-                    if domain and item.get("isVerified") and not is_domain_blacklisted(domain):
-                        valid_domains.append(domain)
-                if valid_domains:
-                    return valid_domains
-        except:
-            pass
-        return None
+        return fetch_mail_domains(self.api_base, self.api_key, self.provider_name)
 
     async def create_inbox(self, session=None):
-        try:
-            domains = self.get_domains()
-            if not domains:
-                return None
-            domain = random.choice(domains)
-            user = "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(10, 16)))
-            self.email = f"{user}@{domain}"
-            self.password = create_random_string(12)
-
-            headers = {"Content-Type": "application/json"}
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            payload = {
-                "address": self.email,
-                "password": self.password,
-                "expiresIn": 0 if self.never_expire else 86400,
-            }
-            create_resp = requests.post(f"{self.api_base}/accounts", headers=headers, json=payload, timeout=15, impersonate="chrome124")
-            if create_resp.status_code not in [200, 201]:
-                return None
-
-            token_payload = {"address": self.email, "password": self.password}
-            token_resp = requests.post(f"{self.api_base}/token", headers={"Content-Type": "application/json"}, json=token_payload, timeout=15, impersonate="chrome124")
-            if token_resp.status_code == 200:
-                token_data = token_resp.json()
-                self.auth_token = token_data.get("token")
-                self.account_id = token_data.get("id")
-            return self.email
-        except:
-            pass
-        return None
+        return await create_mail_inbox(self)
 
     async def get_verification_url(self):
-        if not self.auth_token:
-            return None
-        headers = {"Authorization": f"Bearer {self.auth_token}"}
-        try:
-            for _ in range(3):
-                response = requests.get(f"{self.api_base}/messages", headers=headers, timeout=15, impersonate="chrome124")
-                if response.status_code == 200:
-                    data = response.json()
-                    messages = data.get("hydra:member", [])
-                    if isinstance(messages, list):
-                        for mail in messages:
-                            subject = str(mail.get("subject", "") or "").lower()
-                            from_data = mail.get("from", {}) or {}
-                            from_address = str(from_data.get("address", "") or "").lower()
-                            from_name = str(from_data.get("name", "") or "").lower()
-                            is_discord = "discord" in from_address or "discord" in from_name
-                            has_verify = "verify" in subject or "confirm" in subject or "verification" in subject
-                            if is_discord or has_verify:
-                                msg_id = mail.get("id")
-                                if msg_id:
-                                    detail_resp = requests.get(f"{self.api_base}/messages/{msg_id}", headers=headers, timeout=15, impersonate="chrome124")
-                                    if detail_resp.status_code == 200:
-                                        msg_detail = detail_resp.json()
-                                        content_parts = []
-                                        text_body = str(msg_detail.get("text", "") or "")
-                                        if text_body:
-                                            content_parts.append(text_body)
-                                        html_bodies = msg_detail.get("html", []) or []
-                                        for html_body in html_bodies:
-                                            content_parts.append(str(html_body or ""))
-                                        full_content = "\n".join(content_parts)
-                                        patterns = [
-                                            r'https?://(?:www\.)?discord\.com/verify\?token=[a-zA-Z0-9\-\._~%]+',
-                                            r'https?://click\.discord\.com/ls/click\?upn=[a-zA-Z0-9\-\._~%]+',
-                                        ]
-                                        found_links = []
-                                        for pattern in patterns:
-                                            matches = re.findall(pattern, full_content, re.IGNORECASE)
-                                            for url in matches:
-                                                url = url.replace("\\/", "/").split("\n")[0].strip().replace("&amp;", "&")
-                                                url = re.sub(r"[.,;>]$", "", url)
-                                                if len(url) > 50:
-                                                    found_links.append(url)
-                                        if found_links:
-                                            verify_links = [link for link in found_links if "discord.com/verify" in link]
-                                            if verify_links:
-                                                verify_links.sort(key=len, reverse=True)
-                                                return verify_links[0]
-                                            found_links.sort(key=len, reverse=True)
-                                            return found_links[0]
-                await asyncio.sleep(1)
-        except:
-            pass
-        return None
+        return await get_mail_verification_url(self)
 
 
 class CrowMailProvider:
@@ -1448,115 +2208,16 @@ class CrowMailProvider:
         self.auth_token = None
         self.account_id = None
         self.never_expire = never_expire
+        self.provider_name = "CrowMail"
 
     def get_domains(self):
-        try:
-            headers = {}
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            response = requests.get(f"{self.api_base}/domains", headers=headers, timeout=15, impersonate="chrome124")
-            if response.status_code == 200:
-                data = response.json()
-                members = data.get("hydra:member", [])
-                valid_domains = []
-                for item in members:
-                    domain = item.get("domain")
-                    if domain and item.get("isVerified") and not is_domain_blacklisted(domain):
-                        valid_domains.append(domain)
-                if valid_domains:
-                    return valid_domains
-        except:
-            pass
-        return None
+        return fetch_mail_domains(self.api_base, self.api_key, self.provider_name)
 
     async def create_inbox(self, session=None):
-        try:
-            domains = self.get_domains()
-            if not domains:
-                return None
-            domain = random.choice(domains)
-            user = "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(10, 16)))
-            self.email = f"{user}@{domain}"
-            self.password = create_random_string(12)
-
-            headers = {"Content-Type": "application/json"}
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-            payload = {
-                "address": self.email,
-                "password": self.password,
-                "expiresIn": 0 if self.never_expire else 86400,
-            }
-            create_resp = requests.post(f"{self.api_base}/accounts", headers=headers, json=payload, timeout=15, impersonate="chrome124")
-            if create_resp.status_code not in [200, 201]:
-                return None
-
-            token_payload = {"address": self.email, "password": self.password}
-            token_resp = requests.post(f"{self.api_base}/token", headers={"Content-Type": "application/json"}, json=token_payload, timeout=15, impersonate="chrome124")
-            if token_resp.status_code == 200:
-                token_data = token_resp.json()
-                self.auth_token = token_data.get("token")
-                self.account_id = token_data.get("id")
-            return self.email
-        except:
-            pass
-        return None
+        return await create_mail_inbox(self)
 
     async def get_verification_url(self):
-        if not self.auth_token:
-            return None
-        headers = {"Authorization": f"Bearer {self.auth_token}"}
-        try:
-            for _ in range(3):
-                response = requests.get(f"{self.api_base}/messages", headers=headers, timeout=15, impersonate="chrome124")
-                if response.status_code == 200:
-                    data = response.json()
-                    messages = data.get("hydra:member", [])
-                    if isinstance(messages, list):
-                        for mail in messages:
-                            subject = str(mail.get("subject", "") or "").lower()
-                            from_data = mail.get("from", {}) or {}
-                            from_address = str(from_data.get("address", "") or "").lower()
-                            from_name = str(from_data.get("name", "") or "").lower()
-                            is_discord = "discord" in from_address or "discord" in from_name
-                            has_verify = "verify" in subject or "confirm" in subject or "verification" in subject
-                            if is_discord or has_verify:
-                                msg_id = mail.get("id")
-                                if msg_id:
-                                    detail_resp = requests.get(f"{self.api_base}/messages/{msg_id}", headers=headers, timeout=15, impersonate="chrome124")
-                                    if detail_resp.status_code == 200:
-                                        msg_detail = detail_resp.json()
-                                        content_parts = []
-                                        text_body = str(msg_detail.get("text", "") or "")
-                                        if text_body:
-                                            content_parts.append(text_body)
-                                        html_bodies = msg_detail.get("html", []) or []
-                                        for html_body in html_bodies:
-                                            content_parts.append(str(html_body or ""))
-                                        full_content = "\n".join(content_parts)
-                                        patterns = [
-                                            r'https?://(?:www\.)?discord\.com/verify\?token=[a-zA-Z0-9\-\._~%]+',
-                                            r'https?://click\.discord\.com/ls/click\?upn=[a-zA-Z0-9\-\._~%]+',
-                                        ]
-                                        found_links = []
-                                        for pattern in patterns:
-                                            matches = re.findall(pattern, full_content, re.IGNORECASE)
-                                            for url in matches:
-                                                url = url.replace("\\/", "/").split("\n")[0].strip().replace("&amp;", "&")
-                                                url = re.sub(r"[.,;>]$", "", url)
-                                                if len(url) > 50:
-                                                    found_links.append(url)
-                                        if found_links:
-                                            verify_links = [link for link in found_links if "discord.com/verify" in link]
-                                            if verify_links:
-                                                verify_links.sort(key=len, reverse=True)
-                                                return verify_links[0]
-                                            found_links.sort(key=len, reverse=True)
-                                            return found_links[0]
-                await asyncio.sleep(1)
-        except:
-            pass
-        return None
+        return await get_mail_verification_url(self)
 
 
 class AfhamMailProvider:
@@ -1620,12 +2281,18 @@ class AfhamMailProvider:
                     timeout=15,
                 )
                 if response.status_code in [200, 201]:
-                    data = response.json()
+                    data = response_json(response)
+                    if not isinstance(data, dict) or not data.get("address"):
+                        log_message("ERROR", "Afham returned an invalid inbox payload")
+                        return None
                     self.email = data.get("address")
                     self.inbox_id = data.get("id")
                     return self.email
-        except:
-            pass
+                log_message("ERROR", f"Afham inbox create failed: HTTP {response.status_code}")
+        except httpx.RequestError as e:
+            log_message("ERROR", f"Afham connection failed: {type(e).__name__}")
+        except Exception as e:
+            log_message("ERROR", f"Afham mailbox error: {type(e).__name__}")
         return None
 
     async def get_verification_url(self):
@@ -1708,9 +2375,8 @@ class AfhamMailProvider:
 
 
 def check_environment():
-    if get_brave_path():
-        return True
-    return False
+    path, _name = find_browser_path()
+    return bool(path)
 
 
 class BrowserContext:
@@ -1718,34 +2384,110 @@ class BrowserContext:
         self.driver = None
 
     async def start(self, url, extension_path=None, proxy=None, fingerprint=None):
-        brave_path = get_brave_path()
-        if not brave_path:
-            log_message("ERROR", "brave browser not found")
+        browser_path, browser_name = find_browser_path()
+        if not browser_path:
+            log_message(
+                "ERROR",
+                "no automatable DuckDuckGo.exe found. the Store shortcut in WindowsApps cannot be used. "
+                "set browser_path to ...\\WindowsBrowser\\DuckDuckGo.exe from Get-AppxPackage DuckDuckGo.DesktopBrowser",
+            )
+            return None
+        if not is_duckduckgo_executable(browser_path):
+            log_message("ERROR", "refusing Chrome/Brave/Edge; only DuckDuckGo.exe is allowed")
             return None
 
-        args = ["--lang=en-US"]
+        args = [
+            "--lang=en-US",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-hang-monitor",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-features=Translate,OptimizationHints,MediaRouter",
+            "--window-size=1280,800",
+        ]
         if fingerprint:
             args.extend(build_fingerprint_args(fingerprint))
         if extension_path:
             args.append(f"--load-extension={extension_path}")
-            args.append(f"--disable-extensions-except={extension_path}")
 
         try:
-            self.driver = await uc.start(
-                browser_executable_path=brave_path,
-                browser_args=args,
-                proxy=proxy
-            )
+            log_message("INFO", f"using duckduckgo: {browser_path}")
+            profile_dir = str(Path(get_path("data")) / "ddg-profile")
+            Path(profile_dir).mkdir(parents=True, exist_ok=True)
+            td = get_truedriver()
+            start_kwargs = {
+                "browser_executable_path": browser_path,
+                "browser_args": args,
+                "headless": False,
+                "sandbox": False,
+                "user_data_dir": profile_dir,
+                "browser_connection_timeout": 0.5,
+                "browser_connection_max_tries": 40,
+            }
+            if proxy:
+                start_kwargs["proxy"] = proxy
+            config = None
+            if hasattr(td, "Config"):
+                config = td.Config(**start_kwargs)
+                defaults = getattr(config, "_default_browser_args", None)
+                if isinstance(defaults, list):
+                    config._default_browser_args = [
+                        flag for flag in defaults if "AutomationControlled" not in flag
+                    ]
+                self.driver = await td.start(config)
+            else:
+                self.driver = await td.start(**start_kwargs)
             tab = await self.driver.get(url)
-            await tab.wait_for_ready_state('complete', timeout=30000)
+            try:
+                await tab.wait_for_ready_state('complete', timeout=12000)
+            except Exception:
+                pass
+            ready = await self.wait_for_registration_form(tab)
+            if not ready:
+                log_message("WARNING", "discord register page did not render; reloading once")
+                try:
+                    await tab.reload()
+                    await tab.wait_for_ready_state('complete', timeout=12000)
+                except Exception:
+                    pass
+                ready = await self.wait_for_registration_form(tab)
             try:
                 await tab.evaluate(JS_UTILS)
             except:
                 pass
+            if not ready:
+                log_message("ERROR", "discord page stayed blank (no registration form)")
+                return None
             return tab
         except Exception as e:
             log_message("ERROR", f"browser start failed: {str(e)}")
             return None
+
+    async def wait_for_registration_form(self, tab, timeout=12):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                found = await tab.evaluate(
+                    '''() => {
+                        const el = document.querySelector('input[name="email"]');
+                        if (!el) return false;
+                        const st = window.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+                        return st.display !== "none"
+                            && st.visibility !== "hidden"
+                            && Number(st.opacity || "1") > 0
+                            && r.width > 0
+                            && r.height > 0;
+                    }'''
+                )
+                if found:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.15)
+        return False
 
     async def stop(self):
         if self.driver:
@@ -1776,19 +2518,23 @@ class AccountCreator:
             self.session.proxies = {"http": proxy, "https": proxy}
 
     def save_account_locally(self, status, token=""):
-        output_dir = Path(get_path("output"))
-        output_dir.mkdir(exist_ok=True)
-        if status == "valid" and token:
-            acc_path = output_dir / "accounts.txt"
-            tok_path = output_dir / "tokens.txt"
-            with open(acc_path, "a", encoding="utf-8") as f:
-                f.write(f"{self.email}:{self.password}:{token}\n")
-            with open(tok_path, "a", encoding="utf-8") as f:
-                f.write(f"{token}\n")
-        elif status == "locked" and token:
-            locked_path = output_dir / "locked.txt"
-            with open(locked_path, "a", encoding="utf-8") as f:
-                f.write(f"{self.email}:{self.password}:{token}\n")
+        try:
+            output_dir = Path(get_path("output"))
+            output_dir.mkdir(exist_ok=True)
+            if status == "valid" and token:
+                acc_path = output_dir / "accounts.txt"
+                tok_path = output_dir / "tokens.txt"
+                with open(acc_path, "a", encoding="utf-8") as f:
+                    f.write(f"{self.email}:{self.password}:{token}\n")
+                with open(tok_path, "a", encoding="utf-8") as f:
+                    f.write(f"{token}\n")
+            elif status == "locked" and token:
+                locked_path = output_dir / "locked.txt"
+                with open(locked_path, "a", encoding="utf-8") as f:
+                    f.write(f"{self.email}:{self.password}:{token}\n")
+        except OSError as e:
+            log_message("ERROR", f"failed to write account output: {e}")
+            raise
 
     async def report_status(self, status, token=""):
         self.save_account_locally(status, token)
@@ -1851,36 +2597,39 @@ class AccountCreator:
             return None, 0
 
     async def human_type(self, element, text: str):
-        for char in text:
-            await element.send_keys(char)
-            await asyncio.sleep(random.uniform(0.005, 0.02))
+        await element.send_keys(text)
 
-    async def clear_and_type(self, page, selector: str, value: str, timeout: int = 45):
-        try:
-            element = None
-            for _ in range(5):
-                try:
-                    element = await page.select(selector, timeout=timeout//5)
-                    if element: break
-                except:
-                    await asyncio.sleep(2)
-            if not element:
-                raise Exception(f"Element not found: {selector}")
-            selector_js = json.dumps(selector)
-            await page.evaluate(
-                f'''() => {{
-                    const el = document.querySelector({selector_js});
-                    if (!el) return;
-                    el.focus();
-                    el.value = "";
-                    el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-                    el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-                }}'''
-            )
-            await asyncio.sleep(random.uniform(0.01, 0.04))
-            await self.human_type(element, value)
-        except Exception as e:
-            raise e
+    async def fill_input(self, page, selector: str, value: str, timeout: int = 8):
+        selector_js = json.dumps(selector)
+        value_js = json.dumps(value)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                filled = await page.evaluate(
+                    f'''() => {{
+                        const el = document.querySelector({selector_js});
+                        if (!el) return false;
+                        const st = window.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+                        if (st.display === "none" || st.visibility === "hidden" || r.width < 1 || r.height < 1) return false;
+                        el.focus();
+                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+                        if (setter) setter.call(el, {value_js});
+                        else el.value = {value_js};
+                        el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                        el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+                        return true;
+                    }}'''
+                )
+                if filled:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.15)
+        raise Exception(f"Element not found: {selector}")
+
+    async def clear_and_type(self, page, selector: str, value: str, timeout: int = 8):
+        await self.fill_input(page, selector, value, timeout=timeout)
 
     async def detect_registration_issue(self, page) -> Optional[dict]: 
         try: 
@@ -1909,37 +2658,23 @@ class AccountCreator:
     async def fill_registration_form(self, page, email: str, display_name: str, username: str, password: str) -> bool:
         try:
             try:
-                await self.clear_and_type(page, 'input[name="email"]', email, timeout=45)
-                await asyncio.sleep(random.uniform(0.05, 0.15))
+                await self.fill_input(page, 'input[name="email"]', email, timeout=8)
             except Exception as e:
+                log_message("ERROR", "form failed: registration fields never appeared")
                 return False
             try:
-                await self.clear_and_type(page, 'input[name="global_name"]', display_name, timeout=20)
-                await asyncio.sleep(random.uniform(0.05, 0.15))
+                await self.fill_input(page, 'input[name="global_name"]', display_name, timeout=5)
+                await self.fill_input(page, 'input[name="username"]', username, timeout=5)
+                await self.fill_input(page, 'input[name="password"]', password, timeout=5)
             except Exception as e:
                 return False
-            try:
-                await self.clear_and_type(page, 'input[name="username"]', username, timeout=20)
-                await asyncio.sleep(random.uniform(0.05, 0.15))
-            except Exception as e:
-                return False
-            try:
-                await self.clear_and_type(page, 'input[name="password"]', password, timeout=20)
-                await asyncio.sleep(random.uniform(0.05, 0.15))
-            except Exception as e:
-                return False
-            await asyncio.sleep(0.1)
             await self.fill_date_of_birth(page)
-            await asyncio.sleep(0.05)
             try:
                 await page.evaluate(JS_UTILS)
-                await asyncio.sleep(0.05)
                 await page.evaluate('window.utils.clickAllCheckboxes()')
-                await asyncio.sleep(0.05)
             except Exception as e:
                 pass
             clicked = False
-            await asyncio.sleep(0.1)
             try:
                 buttons = await page.select_all('button')
                 for button in buttons:
@@ -1980,52 +2715,52 @@ class AccountCreator:
             return False
 
     async def fill_date_of_birth(self, page):
+        try:
+            filled = await page.evaluate('''() => {
+                const setListbox = (labelPart, optionText) => {
+                    const trigger = document.querySelector(`[aria-label*="${labelPart}"]`);
+                    if (!trigger) return false;
+                    trigger.click();
+                    const options = [...document.querySelectorAll('[role="option"], [role="listbox"] *')];
+                    const match = options.find(el => (el.textContent || "").trim().startsWith(optionText));
+                    if (match) { match.click(); return true; }
+                    trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+                    return true;
+                };
+                const year = String(1990 + Math.floor(Math.random() * 10));
+                const month = ["January","February","March","April","May","June","July","August","September","October","November","December"][Math.floor(Math.random()*12)];
+                const day = String(1 + Math.floor(Math.random()*27));
+                setListbox("Month", month.slice(0, 3));
+                setListbox("Day", day);
+                setListbox("Year", year);
+                return true;
+            }''')
+            if filled:
+                return
+        except Exception:
+            pass
         import truedriver.cdp.input_ as cdp_input
         try:
-            month_el = await page.select('[aria-label*="Month"], [aria-label*="Mês"]', timeout=5)
-            await month_el.click()
-            await asyncio.sleep(0.05)
-            month_scrolls = random.randint(1, 11)
-            for _ in range(month_scrolls):
-                await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await asyncio.sleep(0.005)
-            await asyncio.sleep(0.05)
-            await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-            await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-            await asyncio.sleep(0.05)
-            day_el = await page.select('[aria-label*="Day"], [aria-label*="Dia"]', timeout=5)
-            await day_el.click()
-            await asyncio.sleep(0.05)
-            day_scrolls = random.randint(1, 28)
-            for _ in range(day_scrolls):
-                await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await asyncio.sleep(0.005)
-            await asyncio.sleep(0.05)
-            await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-            await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-            await asyncio.sleep(0.05)
-            year_el = await page.select('[aria-label*="Year"], [aria-label*="Ano"]', timeout=5)
-            await year_el.click()
-            await asyncio.sleep(0.05)
-            year_scrolls = random.randint(25, 35)
-            for _ in range(year_scrolls):
-                await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
-                await asyncio.sleep(0.005)
-            await asyncio.sleep(0.05)
-            await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-            await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
-        except Exception as e:
+            async def pick(selector, downs):
+                el = await page.select(selector, timeout=3)
+                await el.click()
+                for _ in range(downs):
+                    await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
+                    await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="ArrowDown", windows_virtual_key_code=40, native_virtual_key_code=40))
+                await page.send(cdp_input.dispatch_key_event(type_="keyDown", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
+                await page.send(cdp_input.dispatch_key_event(type_="keyUp", key="Enter", windows_virtual_key_code=13, native_virtual_key_code=13))
+            await pick('[aria-label*="Month"], [aria-label*="Mês"]', random.randint(1, 4))
+            await pick('[aria-label*="Day"], [aria-label*="Dia"]', random.randint(1, 5))
+            await pick('[aria-label*="Year"], [aria-label*="Ano"]', random.randint(8, 14))
+        except Exception:
             pass
 
     async def handle_challenges(self, page):
         try:
             is_active = False
             clear_started = None
-            stable_wait = 4.0
-            for i in range(180):
+            stable_wait = 1.5
+            for i in range(90):
                 queries = ['iframe[src*="captcha"]', 'div[class*="captcha"]', '.h-captcha', '.g-recaptcha', '[data-sitekey]']
                 detected = False
                 for q in queries:
@@ -2038,7 +2773,6 @@ class AccountCreator:
                         continue
 
                 if detected and not is_active:
-                    log_message("INFO", "mail pulled")
                     log_message("WARNING", "captcha appeared")
                     is_active = True
                     clear_started = None
@@ -2049,15 +2783,14 @@ class AccountCreator:
                             clear_started = time.monotonic()
                         elapsed = time.monotonic() - clear_started
                         if elapsed >= stable_wait:
-                            log_message("INFO", "captcha cleared after manual solve")
                             log_message("SUCCESS", "captcha solved")
                             return True
-                    elif i >= 10:
+                    elif i >= 2:
                         return True
                 else:
                     clear_started = None
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.25)
         except Exception:
             pass
         return True
@@ -2114,7 +2847,7 @@ class AccountCreator:
 
             except Exception as e:
                 log_message("WARNING", f"Token check error: {str(e)}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
         log_message("ERROR", f"Token wait timeout ({timeout}s)")
         return None, None
 
@@ -2132,7 +2865,7 @@ class AccountCreator:
                     library = self.session.get(
                         "https://discordapp.com/api/v9/users/@me/library",
                         headers=headers,
-                        timeout=15,
+                        timeout=5,
                     )
                     if library.status_code == 403:
                         return "locked"
@@ -2172,18 +2905,18 @@ class AccountCreator:
     async def verify_email(self):
         url = None
         log_message("INFO", "Waiting for verification email...")
-        for attempt in range(300):
+        for attempt in range(180):
             try:
                 url = await self.mailbox.get_verification_url()
                 if url:
                     break
             except Exception as e:
-                if attempt % 30 == 0 and attempt > 0:
+                if attempt % 20 == 0 and attempt > 0:
                     log_message("WARNING", f"Still waiting for email ({attempt}s)")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.35)
 
         if not url:
-            log_message("ERROR", "Mail timeout (300s)")
+            log_message("ERROR", "Mail timeout")
             return None
 
         try:
@@ -2199,7 +2932,7 @@ class AccountCreator:
 
             log_message("INFO", "Extracting authentication token...")
             challenge_task = asyncio.create_task(self.handle_challenges(tab))
-            token, status = await self.wait_for_auth(tab, timeout=180)
+            token, status = await self.wait_for_auth(tab, timeout=90)
 
             try:
                 challenge_task.cancel()
@@ -2224,8 +2957,14 @@ class AccountCreator:
                 mask = f"{token[:24]}{'*' * 12}"
                 ts = datetime.now().strftime("%H:%M:%S")
                 print(f"{Fore.LIGHTBLACK_EX}{ts}{Style.RESET_ALL}  {Fore.YELLOW}WAR{Style.RESET_ALL}  {Fore.WHITE}Locked: {Style.RESET_ALL}{Fore.LIGHTBLACK_EX}{mask}{Style.RESET_ALL}")
-                with open("output/locked.txt", "a", encoding="utf-8") as f:
-                    f.write(f"{self.email}:{self.password}:{token}\n")
+                try:
+                    output_dir = Path(get_path("output"))
+                    output_dir.mkdir(exist_ok=True)
+                    with open(output_dir / "locked.txt", "a", encoding="utf-8") as f:
+                        f.write(f"{self.email}:{self.password}:{token}\n")
+                except OSError as e:
+                    log_message("ERROR", f"failed to write locked account output: {e}")
+                    raise
                 return "LOCKED"
 
             log_message("SUCCESS", "Verified successfully")
@@ -2241,14 +2980,16 @@ class AccountCreator:
 
     def save_data(self, token):
         try:
-            os.makedirs("output", exist_ok=True)
-            with open("output/tokens.txt", "a", encoding="utf-8") as f:
+            output_dir = Path(get_path("output"))
+            output_dir.mkdir(exist_ok=True)
+            with open(output_dir / "tokens.txt", "a", encoding="utf-8") as f:
                 f.write(token + "\n")
-            with open("output/accounts.txt", "a", encoding="utf-8") as f:
+            with open(output_dir / "accounts.txt", "a", encoding="utf-8") as f:
                 f.write(f"{self.email}:{self.password}:{token}\n")
             self.token = token
-        except:
-            pass
+        except OSError as e:
+            log_message("ERROR", f"failed to write account output: {e}")
+            raise
 
 
 
@@ -2291,6 +3032,7 @@ def consume_fingerprint_line(raw_line: str) -> bool:
         lines = _load_fp_lines()
         if raw_line not in lines:
             return False
+        lines.remove(raw_line)
         FP_FILE.write_text(chr(10).join(lines) + (chr(10) if lines else ""), encoding="utf-8")
         return True
 
@@ -2406,6 +3148,27 @@ def get_fingerprint_label(fp: dict) -> str:
     return fp.get('name') or fp.get('fingerprint', '')[:20] or fp.get('user_agent', '')[:40] or 'custom'
 
 
+def soften_windows_yaml_paths(text):
+    """YAML double quotes treat \\Users as an escape. Convert those paths to single quotes."""
+
+    def replacer(match):
+        inner = match.group(1).replace("\\\\", "\\")
+        return "'" + inner.replace("'", "''") + "'"
+
+    return re.sub(r'"([A-Za-z]:\\[^"\n]*)"', replacer, text)
+
+
+def load_yaml_config(config_path):
+    raw = Path(config_path).read_text(encoding="utf-8")
+    try:
+        loaded = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        loaded = yaml.safe_load(soften_windows_yaml_paths(raw))
+    if not isinstance(loaded, dict):
+        raise ValueError("config.yaml must contain a mapping of settings")
+    return loaded
+
+
 def setup_files():
     folders = ["config", "extension", "output", "data", "data/avatars", "input"]
     for folder in folders:
@@ -2414,7 +3177,16 @@ def setup_files():
     config_path = Path(get_path("config/config.yaml"))
     if not config_path.exists():
         with open(config_path, "w") as f:
-            yaml.dump({"cybertemp_key": "", "hotmail007_key": "", "zeusx_key": "", "afham_mail_api9_key": "", "vpn": False, "vpn_delay": 120}, f)
+            yaml.dump({
+                "cybertemp_key": "",
+                "hotmail007_key": "",
+                "zeusx_key": "",
+                "afham_mail_api9_key": "",
+                "vpn": False,
+                "vpn_delay": 120,
+                "browser": "duckduckgo",
+                "browser_path": "",
+            }, f)
     
     nopecha_path = Path(get_path("config/nopecha.txt"))
     if not nopecha_path.exists():
@@ -2438,20 +3210,22 @@ async def main():
             prompt_user("press enter to exit")
             return
 
-        with open(config_path, "r") as f:
-            cfg = yaml.safe_load(f)
-            use_vpn = cfg.get('vpn', False)
-            vpn_delay = int(cfg.get('vpn_delay', 120))
+        cfg = load_yaml_config(config_path)
+        use_vpn = cfg.get('vpn', False)
+        vpn_delay = int(cfg.get('vpn_delay', 8))
+        configure_browser(cfg)
     except Exception as e:
         log_message("ERROR", f"config error: {e}")
         prompt_user("press enter to exit")
         return
 
     if use_vpn:
-        await mullvad_ensure_connected()
+        if not await require_vpn_connection():
+            prompt_user("press enter to exit")
+            return
 
     if not check_environment():
-        log_message("WARNING", "brave not found")
+        log_message("WARNING", "DuckDuckGo Browser not found. install it and set browser_path to DuckDuckGo.exe")
 
     proxies = load_proxies(cfg)
 
@@ -2459,9 +3233,10 @@ async def main():
     
     service = prompt_user("Service:").strip().lower()
     if service == 'h':
-        key = cfg.get('hotmail007_key')
+        key = str(cfg.get('hotmail007_key') or "").strip().strip('"').strip("'")
         mail_type = str(cfg.get('hotmail007_mail_type', 'hotmail')).strip() or 'hotmail'
-        mailbox_class = lambda api_key: Hotmail007Provider(api_key, mail_type=mail_type)
+        product_id = cfg.get('hotmail007_product_id')
+        mailbox_class = lambda api_key: Hotmail007Provider(api_key, mail_type=mail_type, product_id=product_id)
     elif service == 'z':
         key = cfg.get('zeusx_key')
         mailbox_class = ZeusXProvider
@@ -2544,7 +3319,10 @@ async def main():
             elif target != 0 and done >= target: break
             else:
                 if use_vpn:
-                    await rotate_mullvad_ip()
+                    rotated = await rotate_mullvad_ip()
+                    if not rotated:
+                        log_message("ERROR", "vpn rotation failed; stopping")
+                        break
                 else:
                     await animated_cooldown(vpn_delay)
                 
@@ -2559,16 +3337,29 @@ async def main():
 
 if __name__ == '__main__':
     def silent_error(loop, context):
-        pass
-        
+        message = context.get("message", "async error")
+        exception = context.get("exception")
+        detail = f"{message}: {exception}" if exception else message
+        log_message("ERROR", detail)
+
     try:
+        configure_stdio()
+        if not install_requirements():
+            log_message("ERROR", "required packages are missing; install them from requirements.txt")
+            prompt_user("press enter to exit")
+            sys.exit(1)
+        refresh_optional_imports()
+        if missing_required_modules():
+            log_message("ERROR", f"missing packages: {', '.join(missing_required_modules())}")
+            prompt_user("press enter to exit")
+            sys.exit(1)
         if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.set_exception_handler(silent_error)
-        
+
         try:
             loop.run_until_complete(main())
         except (asyncio.CancelledError, KeyboardInterrupt):
@@ -2576,9 +3367,12 @@ if __name__ == '__main__':
         finally:
             loop.close()
     except Exception as e:
-        with open("crash.log", "w") as f:
-            f.write(f"CRASH: {str(e)}\n\n")
-            f.write(traceback.format_exc())
+        try:
+            with open("crash.log", "w", encoding="utf-8") as f:
+                f.write(f"CRASH: {str(e)}\n\n")
+                f.write(traceback.format_exc())
+        except OSError as write_error:
+            log_message("ERROR", f"failed to write crash.log: {write_error}")
         print(f"CRASH: {str(e)}")
         prompt_user("press enter to exit")
     finally:
